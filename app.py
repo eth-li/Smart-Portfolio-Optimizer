@@ -31,18 +31,11 @@ except ImportError:
     OPTIMIZER_LIVE = False
 
 
-def _current_weights(portfolio_df: pd.DataFrame, spot_prices: dict) -> pd.Series:
-    """Compute current portfolio weights from shares × spot prices."""
-    df = portfolio_df.copy()
-    df["price"] = df["ticker"].map(spot_prices)
-    df["value"] = df["shares"] * df["price"]
-    df["weight"] = df["value"] / df["value"].sum()
-    return df.set_index("ticker")["weight"]
-
-
 def _run_pipeline(portfolio_df: pd.DataFrame, risk_bucket: str):
     """Run live pipeline if available; otherwise load contract mocks."""
     tickers = portfolio_df["ticker"].tolist()
+    # weights column is already normalized to sum to 1.0
+    curr_weights = portfolio_df.set_index("ticker")["weight"]
 
     # ── Data pipeline (Person A) ─────────────────────────────────────────────
     if DATA_LIVE:
@@ -57,7 +50,6 @@ def _run_pipeline(portfolio_df: pd.DataFrame, risk_bucket: str):
                 compute_expected_returns(returns_df)
                 .set_index("ticker")["expected_return_annual"]
             )
-            curr_weights = _current_weights(portfolio_df, spot_prices)
     else:
         iv_df = pd.read_csv(CONTRACTS / "iv.csv")
         cov_df = pd.read_csv(CONTRACTS / "covariance.csv", index_col=0)
@@ -65,9 +57,6 @@ def _run_pipeline(portfolio_df: pd.DataFrame, risk_bucket: str):
             pd.read_csv(CONTRACTS / "expected_returns.csv")
             .set_index("ticker")["expected_return_annual"]
         )
-        # In mock mode, current weights come from the pre-computed contract file
-        weights_mock = pd.read_csv(CONTRACTS / "optimized_weights.csv")
-        curr_weights = weights_mock.set_index("ticker")["current_weight"]
 
     # ── Optimizer (Person B) ─────────────────────────────────────────────────
     if OPTIMIZER_LIVE:
@@ -78,7 +67,10 @@ def _run_pipeline(portfolio_df: pd.DataFrame, risk_bucket: str):
             metrics_df = compute_metrics(cov_df, exp_ret, curr_weights, opt_weights, risk_bucket)
             weights_df = result_df  # already has ticker, current_weight, optimized_weight
     else:
+        # Mock mode: patch current_weight with what the user actually entered
         weights_df = pd.read_csv(CONTRACTS / "optimized_weights.csv")
+        weights_df = weights_df[weights_df["ticker"].isin(tickers)].copy()
+        weights_df["current_weight"] = weights_df["ticker"].map(curr_weights)
         frontier_df = pd.read_csv(CONTRACTS / "frontier.csv")
         metrics_df = pd.read_csv(CONTRACTS / "metrics.csv")
 
@@ -105,24 +97,36 @@ with st.sidebar:
 
     st.divider()
     st.subheader("Holdings")
+    st.caption("Enter each stock's allocation as a percentage. Rows sum should equal 100%.")
 
-    default_portfolio = pd.read_csv(CONTRACTS / "portfolio_input.csv")
+    default_portfolio = pd.DataFrame({
+        "ticker": ["AAPL", "MSFT", "NVDA", "GOOGL", "XOM"],
+        "weight_%": [22.0, 26.8, 41.6, 3.3, 6.3],
+    })
+
     edited_df = st.data_editor(
         default_portfolio,
         num_rows="dynamic",
         column_config={
             "ticker": st.column_config.TextColumn("Ticker", width="small"),
-            "shares": st.column_config.NumberColumn("Shares", min_value=1, step=1, width="small"),
+            "weight_%": st.column_config.NumberColumn(
+                "Weight (%)",
+                min_value=0.0,
+                max_value=100.0,
+                step=0.1,
+                format="%.1f",
+                width="small",
+            ),
         },
         use_container_width=True,
         hide_index=True,
         key="portfolio_editor",
     )
 
-    portfolio_df = edited_df.dropna().copy()
+    portfolio_df = edited_df.dropna(subset=["ticker"]).copy()
     portfolio_df["ticker"] = portfolio_df["ticker"].str.upper().str.strip()
     portfolio_df = portfolio_df[portfolio_df["ticker"] != ""]
-    portfolio_df["shares"] = portfolio_df["shares"].astype(int)
+    portfolio_df["weight_%"] = pd.to_numeric(portfolio_df["weight_%"], errors="coerce").fillna(0.0)
 
     if len(portfolio_df) < 2:
         st.error("Add at least 2 tickers.")
@@ -130,6 +134,18 @@ with st.sidebar:
     if len(portfolio_df) > 10:
         st.error("Maximum 10 tickers.")
         st.stop()
+
+    total_pct = portfolio_df["weight_%"].sum()
+    if abs(total_pct - 100.0) < 0.5:
+        st.success(f"Total: {total_pct:.1f}%")
+    else:
+        st.warning(f"Total: {total_pct:.1f}% — weights should sum to 100%.")
+
+    # Normalize to exactly 1.0 for the optimizer
+    if total_pct < 1e-6:
+        st.error("All weights are zero.")
+        st.stop()
+    portfolio_df["weight"] = portfolio_df["weight_%"] / total_pct
 
     run_btn = st.button("Optimize Portfolio", type="primary", use_container_width=True)
 
