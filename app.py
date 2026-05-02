@@ -148,6 +148,7 @@ with st.sidebar:
     portfolio_df["weight"] = portfolio_df["weight_%"] / total_pct
 
     run_btn = st.button("Optimize Portfolio", type="primary", use_container_width=True)
+    st.caption("Results update automatically when you change weights.")
 
     st.divider()
     mode_parts = []
@@ -162,11 +163,14 @@ with st.sidebar:
 st.title("Smart Portfolio Optimizer")
 st.caption("CDS Datathon 2026 — Optimize your allocation based on risk tolerance and forward-looking volatility.")
 
-if "results" not in st.session_state:
+# Rerun whenever portfolio or risk bucket changes (not just on button click)
+portfolio_key = (
+    tuple(zip(portfolio_df["ticker"], portfolio_df["weight_%"].round(1))),
+    risk_bucket,
+)
+if run_btn or st.session_state.get("portfolio_key") != portfolio_key:
     st.session_state.results = _run_pipeline(portfolio_df, risk_bucket)
-
-if run_btn:
-    st.session_state.results = _run_pipeline(portfolio_df, risk_bucket)
+    st.session_state.portfolio_key = portfolio_key
 
 weights_df, frontier_df, metrics_df, iv_df = st.session_state.results
 row = metrics_df.iloc[0]
@@ -231,6 +235,26 @@ with col_right:
     )
 
 st.plotly_chart(plot_metrics_table(metrics_df), use_container_width=True)
+
+# ── Optimal allocation table ─────────────────────────────────────────────────
+st.subheader("Recommended Allocation")
+alloc_table = weights_df[["ticker", "current_weight", "optimized_weight"]].copy()
+alloc_table["current_%"] = (alloc_table["current_weight"] * 100).round(1)
+alloc_table["optimized_%"] = (alloc_table["optimized_weight"] * 100).round(1)
+alloc_table["change (pp)"] = (alloc_table["optimized_%"] - alloc_table["current_%"]).round(1)
+alloc_table = alloc_table[["ticker", "current_%", "optimized_%", "change (pp)"]].rename(columns={
+    "ticker": "Ticker",
+    "current_%": "Current (%)",
+    "optimized_%": "Optimized (%)",
+})
+st.dataframe(
+    alloc_table.style.map(
+        lambda v: "color: #2ECC71" if v > 0 else ("color: #E74C3C" if v < 0 else ""),
+        subset=["change (pp)"],
+    ),
+    hide_index=True,
+    use_container_width=True,
+)
 
 # ── IV detail ────────────────────────────────────────────────────────────────
 with st.expander("Implied Volatility Detail"):
