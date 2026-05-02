@@ -16,7 +16,7 @@ def load_portfolio(path: str = "contracts/portfolio_input.csv") -> pd.DataFrame:
     return pd.read_csv(path)
 
 
-def fetch_returns(tickers: list, period_years: int = 2) -> pd.DataFrame:
+def fetch_returns(tickers: list, period_years: int = 5) -> pd.DataFrame:
     end = datetime.today()
     start = end - timedelta(days=365 * period_years + 60)
 
