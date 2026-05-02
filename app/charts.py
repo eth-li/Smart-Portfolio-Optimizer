@@ -1,68 +1,91 @@
 import plotly.graph_objects as go
 import pandas as pd
+import numpy as np
+
+
+def _effective_n(weights: pd.Series) -> float:
+    """
+    Effective number of positions = 1 / sum(w_i^2).
+    Ranges from 1 (fully concentrated) to n (equally weighted).
+    """
+    w = weights.values.astype(float)
+    hhi = (w ** 2).sum()
+    return 1.0 / hhi if hhi > 1e-10 else 1.0
 
 
 def plot_efficient_frontier(frontier_df: pd.DataFrame, metrics_df: pd.DataFrame) -> go.Figure:
+    """
+    Efficient frontier: Annualized Vol (x) vs Effective Number of Positions (y).
+
+    Since we use a minimum-variance optimizer (no return estimates), the y-axis
+    shows portfolio diversification rather than expected return. Higher effective N
+    = more diversified. As you allow more risk (higher vol target), the optimizer
+    concentrates into fewer positions.
+    """
     row = metrics_df.iloc[0]
+
+    meta_cols = {"target_vol_annual", "realized_vol_annual"}
+    ticker_cols = [c for c in frontier_df.columns if c not in meta_cols]
+
+    weight_matrix = frontier_df[ticker_cols].values.astype(float)
+    hhi = (weight_matrix ** 2).sum(axis=1)
+    effective_n = np.where(hhi > 1e-10, 1.0 / hhi, 1.0)
+
     fig = go.Figure()
 
     fig.add_trace(go.Scatter(
-        x=frontier_df["target_vol_annual"],
-        y=frontier_df["expected_return_annual"],
+        x=frontier_df["realized_vol_annual"],
+        y=effective_n,
         mode="lines+markers",
-        name="Efficient Frontier",
+        name="Min-Variance Frontier",
         line=dict(color="#4A90D9", width=2.5),
-        marker=dict(
-            size=7,
-            color=frontier_df["sharpe_ratio"],
-            colorscale="Viridis",
-            showscale=True,
-            colorbar=dict(title="Sharpe Ratio", thickness=12, len=0.7),
-        ),
-        hovertemplate="Vol: %{x:.1%}<br>Return: %{y:.1%}<br>Sharpe: %{marker.color:.2f}<extra></extra>",
+        marker=dict(size=6, color="#4A90D9"),
+        hovertemplate="Vol: %{x:.1%}<br>Effective Positions: %{y:.1f}<extra></extra>",
     ))
 
+    curr_vol = row["current_vol_annual"]
+    opt_vol = row["optimized_vol_annual"]
+
+    closest_curr = (frontier_df["realized_vol_annual"] - curr_vol).abs().idxmin()
+    closest_opt = (frontier_df["realized_vol_annual"] - opt_vol).abs().idxmin()
+    curr_eff_n = effective_n[closest_curr]
+    opt_eff_n = effective_n[closest_opt]
+
     fig.add_trace(go.Scatter(
-        x=[row["current_vol_annual"]],
-        y=[row["current_return_annual"]],
+        x=[curr_vol],
+        y=[curr_eff_n],
         mode="markers+text",
         name="Current Portfolio",
         marker=dict(size=16, color="#E74C3C", symbol="diamond"),
         text=["Current"],
         textposition="top right",
-        hovertemplate="Current Portfolio<br>Vol: %{x:.1%}<br>Return: %{y:.1%}<extra></extra>",
+        hovertemplate="Current Portfolio<br>Vol: %{x:.1%}<br>Effective Positions: %{y:.1f}<extra></extra>",
     ))
 
     fig.add_trace(go.Scatter(
-        x=[row["optimized_vol_annual"]],
-        y=[row["optimized_return_annual"]],
+        x=[opt_vol],
+        y=[opt_eff_n],
         mode="markers+text",
         name="Optimized Portfolio",
         marker=dict(size=16, color="#2ECC71", symbol="star"),
         text=["Optimized"],
         textposition="top right",
-        hovertemplate="Optimized Portfolio<br>Vol: %{x:.1%}<br>Return: %{y:.1%}<extra></extra>",
+        hovertemplate="Optimized Portfolio<br>Vol: %{x:.1%}<br>Effective Positions: %{y:.1f}<extra></extra>",
     ))
 
-    # Arrow annotation showing the improvement direction
     fig.add_annotation(
-        x=row["optimized_vol_annual"],
-        y=row["optimized_return_annual"],
-        ax=row["current_vol_annual"],
-        ay=row["current_return_annual"],
+        x=opt_vol, y=opt_eff_n,
+        ax=curr_vol, ay=curr_eff_n,
         xref="x", yref="y", axref="x", ayref="y",
-        showarrow=True,
-        arrowhead=2,
-        arrowsize=1.5,
-        arrowwidth=2,
+        showarrow=True, arrowhead=2, arrowsize=1.5, arrowwidth=2,
         arrowcolor="#27AE60",
     )
 
     fig.update_layout(
-        title="Efficient Frontier",
+        title="Min-Variance Frontier: Risk vs Diversification",
         xaxis=dict(title="Annualized Volatility", tickformat=".0%"),
-        yaxis=dict(title="Expected Annual Return", tickformat=".0%"),
-        legend=dict(yanchor="bottom", y=0.01, xanchor="left", x=0.01),
+        yaxis=dict(title="Effective Number of Positions", tickformat=".1f"),
+        legend=dict(yanchor="bottom", y=0.01, xanchor="right", x=0.99),
         height=480,
         template="plotly_white",
         margin=dict(t=50, b=50, l=60, r=60),
@@ -114,33 +137,21 @@ def plot_allocation_comparison(weights_df: pd.DataFrame) -> go.Figure:
 
 def plot_metrics_table(metrics_df: pd.DataFrame) -> go.Figure:
     row = metrics_df.iloc[0]
-    sharpe_delta = row["optimized_sharpe"] - row["current_sharpe"]
 
-    labels = ["Annualized Volatility", "Expected Return", "Sharpe Ratio", "Risk Bucket"]
-    current_vals = [
-        f"{row['current_vol_annual']:.1%}",
-        f"{row['current_return_annual']:.1%}",
-        f"{row['current_sharpe']:.2f}",
-        row["risk_bucket"],
-    ]
-    optimized_vals = [
-        f"{row['optimized_vol_annual']:.1%}",
-        f"{row['optimized_return_annual']:.1%}",
-        f"{row['optimized_sharpe']:.2f}",
-        row["risk_bucket"],
-    ]
-    delta_vals = [
-        f"▼ {row['vol_reduction_pct']:.1f}%",
-        f"▲ {row['return_improvement_pct']:.1f}%",
-        f"▲ {sharpe_delta:.2f}",
-        "—",
-    ]
-    delta_colors = ["#2ECC71", "#2ECC71", "#2ECC71", "#888888"]
+    vol_abs = row.get("vol_reduction_abs", row["current_vol_annual"] - row["optimized_vol_annual"])
+    current_bucket = row.get("current_bucket", "—")
+    optimized_bucket = row.get("optimized_bucket", "—")
+
+    labels       = ["Annualized Volatility", "Vol Reduction",                              "Risk Zone",                           "Target Vol"]
+    current_vals = [f"{row['current_vol_annual']:.1%}",   "—",                             current_bucket,                        "—"]
+    optimized_vals = [f"{row['optimized_vol_annual']:.1%}", f"{row['vol_reduction_pct']:.1f}%  ({vol_abs:.1%} pp)", optimized_bucket, f"{row['target_vol']:.1%}"]
+    delta_vals   = [f"▼ {row['vol_reduction_pct']:.1f}%", "—",                             f"{current_bucket} → {optimized_bucket}", "—"]
+    delta_colors = ["#2ECC71", "#888888", "#4A90D9", "#888888"]
 
     fig = go.Figure(data=[go.Table(
-        columnwidth=[180, 140, 140, 100],
+        columnwidth=[180, 140, 180, 160],
         header=dict(
-            values=["<b>Metric</b>", "<b>Current</b>", "<b>Optimized</b>", "<b>Delta</b>"],
+            values=["<b>Metric</b>", "<b>Current</b>", "<b>Optimized</b>", "<b>Change</b>"],
             fill_color="#2C3E50",
             font=dict(color="white", size=13),
             align="left",
@@ -148,20 +159,15 @@ def plot_metrics_table(metrics_df: pd.DataFrame) -> go.Figure:
         ),
         cells=dict(
             values=[labels, current_vals, optimized_vals, delta_vals],
-            fill_color=[
-                ["#F8F9FA"] * 4,
-                ["#FDEDEC"] * 4,
-                ["#EAFAF1"] * 4,
-                ["#F8F9FA"] * 4,
-            ],
-            font=dict(size=13, color=[["#2C3E50"] * 4, ["#2C3E50"] * 4, ["#2C3E50"] * 4, delta_colors]),
+            fill_color=[["#F8F9FA"]*4, ["#FDEDEC"]*4, ["#EAFAF1"]*4, ["#F8F9FA"]*4],
+            font=dict(size=13, color=[["#2C3E50"]*4, ["#2C3E50"]*4, ["#2C3E50"]*4, delta_colors]),
             align="left",
             height=34,
         ),
     )])
 
     fig.update_layout(
-        title="Portfolio Metrics Summary",
+        title="Portfolio Risk Summary",
         height=260,
         margin=dict(t=50, b=0, l=0, r=0),
     )
