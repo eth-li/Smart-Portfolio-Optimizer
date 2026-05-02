@@ -22,7 +22,13 @@ except ImportError:
     DATA_LIVE = False
 
 try:
-    from data.buckets import get_bucket_params, check_exceeds_bucket
+    # check_exceeds_bucket removed — use get_bucket_params + classify_vol instead
+    from data.buckets import (
+        get_bucket_params,
+        classify_vol,
+        default_target_vol,
+        BUCKET_PARAMS,
+    )
     from optimizer.solve import optimize
     from optimizer.frontier import generate_frontier
     from optimizer.metrics import compute_metrics
@@ -60,13 +66,25 @@ def _run_pipeline(portfolio_df: pd.DataFrame, risk_bucket: str):
 
     # ── Optimizer (Person B) ─────────────────────────────────────────────────
     if OPTIMIZER_LIVE:
-        result_df = optimize(cov_df, exp_ret, curr_weights, risk_bucket)
-        frontier_df = generate_frontier(cov_df, exp_ret, curr_weights, risk_bucket)
+        # Resolve target_vol and position cap from the chosen bucket
+        bucket_params = get_bucket_params(risk_bucket)
+        target_vol = default_target_vol(risk_bucket)
+
+        result_df = optimize(
+            cov_df, exp_ret, curr_weights,
+            target_vol=target_vol,
+            max_position=bucket_params["max_position"],
+        )
+        frontier_df = generate_frontier(
+            cov_df, exp_ret,
+            vol_max=bucket_params["vol_max"],
+            max_position=bucket_params["max_position"],
+        )
         opt_weights = result_df.set_index("ticker")["optimized_weight"]
-        metrics_df = compute_metrics(cov_df, exp_ret, curr_weights, opt_weights, risk_bucket)
+        metrics_df = compute_metrics(cov_df, exp_ret, curr_weights, opt_weights, target_vol)
         weights_df = result_df
     else:
-        # Mock mode: patch current_weight from user input; note results won't vary by bucket
+        # Mock mode: patch current_weight from user input; results won't vary by bucket
         weights_df = pd.read_csv(CONTRACTS / "optimized_weights.csv")
         weights_df = weights_df[weights_df["ticker"].isin(tickers)].copy()
         weights_df["current_weight"] = weights_df["ticker"].map(curr_weights)
@@ -92,7 +110,7 @@ with st.sidebar:
         "Risk Tolerance",
         ["Conservative", "Moderate", "Aggressive"],
         index=1,
-        help="Conservative ≤ 24% vol · Moderate 24–28% · Aggressive 28–35%",
+        help="Conservative ≤ 20% vol · Moderate 20–28% · Aggressive 28–40%",
     )
 
     st.divider()
@@ -169,7 +187,7 @@ portfolio_key = (
     risk_bucket,
 )
 if run_btn or st.session_state.get("portfolio_key") != portfolio_key:
-    st.session_state.portfolio_key = portfolio_key  # update key first so errors don't cause retry loops
+    st.session_state.portfolio_key = portfolio_key
     try:
         st.session_state.results = _run_pipeline(portfolio_df, risk_bucket)
     except Exception as e:
@@ -201,11 +219,11 @@ col4.metric(
     delta=f"{row['optimized_sharpe'] - row['current_sharpe']:+.2f}",
 )
 
-# Bucket vol warning (use Person B's bucket thresholds if available)
+# Bucket vol warning — use BUCKET_PARAMS if optimizer live, otherwise read from dict
 if OPTIMIZER_LIVE:
     bucket_vol_max = get_bucket_params(risk_bucket)["vol_max"]
 else:
-    bucket_vol_max = {"Conservative": 0.24, "Moderate": 0.28, "Aggressive": 0.35}[risk_bucket]
+    bucket_vol_max = BUCKET_PARAMS.get(risk_bucket, {}).get("vol_max", 0.40)
 
 if row["current_vol_annual"] > bucket_vol_max:
     st.warning(
