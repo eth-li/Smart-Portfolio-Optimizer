@@ -71,17 +71,17 @@ def _run_pipeline(portfolio_df: pd.DataFrame, risk_bucket: str):
         target_vol = default_target_vol(risk_bucket)
 
         result_df = optimize(
-            cov_df, exp_ret, curr_weights,
+            cov_df, curr_weights,
             target_vol=target_vol,
             max_position=bucket_params["max_position"],
         )
         frontier_df = generate_frontier(
-            cov_df, exp_ret,
-            vol_max=bucket_params["vol_max"],
-            max_position=bucket_params["max_position"],
-        )
+                    cov_df,
+                    vol_max=bucket_params["vol_max"],
+                    max_position=bucket_params["max_position"],
+                )
         opt_weights = result_df.set_index("ticker")["optimized_weight"]
-        metrics_df = compute_metrics(cov_df, exp_ret, curr_weights, opt_weights, target_vol)
+        metrics_df = compute_metrics(cov_df, curr_weights, opt_weights, target_vol)
         weights_df = result_df
     else:
         # Mock mode: patch current_weight from user input; results won't vary by bucket
@@ -108,9 +108,9 @@ with st.sidebar:
 
     risk_bucket = st.selectbox(
         "Risk Tolerance",
-        ["Conservative", "Moderate", "Aggressive"],
-        index=1,
-        help="Conservative ≤ 20% vol · Moderate 20–28% · Aggressive 28–40%",
+        ["Low", "Medium-Low", "Medium", "Medium-High", "High"],
+        index=2,
+        help="Low ≤ 15% vol · Medium-Low 15–22% · Medium 22–28% · Medium-High 28–35% · High 35–50%",
     )
 
     st.divider()
@@ -208,15 +208,20 @@ col1.metric(
     delta_color="inverse",
 )
 col2.metric(
-    "Return Change",
-    f"{row['return_improvement_pct']:+.1f}%",
-    delta=f"{row['current_return_annual']:.1%} → {row['optimized_return_annual']:.1%}",
+    "Current Vol",
+    f"{row['current_vol_annual']:.1%}",
+    delta=row.get("current_bucket", ""),
+    delta_color="off",
 )
-col3.metric("Sharpe (Current)", f"{row['current_sharpe']:.2f}")
+col3.metric(
+    "Optimized Vol",
+    f"{row['optimized_vol_annual']:.1%}",
+    delta=row.get("optimized_bucket", ""),
+    delta_color="off",
+)
 col4.metric(
-    "Sharpe (Optimized)",
-    f"{row['optimized_sharpe']:.2f}",
-    delta=f"{row['optimized_sharpe'] - row['current_sharpe']:+.2f}",
+    "Target Vol",
+    f"{row['target_vol']:.1%}",
 )
 
 # Bucket vol warning — use BUCKET_PARAMS if optimizer live, otherwise read from dict
