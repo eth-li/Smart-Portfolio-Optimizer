@@ -1,6 +1,11 @@
-ticker,current_weight
-AAPL,0.22
-MSFT,0.27
-NVDA,0.42
-GOOGL,0.03
-XOM,0.06
+ticker,shares
+AAPL,50
+MSFT,30
+NVDA,20
+GOOGL,10
+XOM,25
+SPY,15
+META,12
+JPM,40
+JNJ,35
+V,20
