@@ -95,7 +95,7 @@ def compute_metrics(
     expected_returns: pd.Series,
     current_weights: pd.Series,
     optimized_weights: pd.Series,
-    risk_bucket: str,
+    target_vol: float,
 ) -> pd.DataFrame:
     """
     Compute before/after portfolio statistics for the summary metrics table.
@@ -110,8 +110,9 @@ def compute_metrics(
         Current portfolio weights (by market value), indexed by ticker. Sums to ~1.
     optimized_weights : pd.Series
         Optimizer-recommended weights, indexed by ticker. Sums to ~1.
-    risk_bucket : str
-        One of 'Conservative', 'Moderate', 'Aggressive' (as selected by the user).
+    target_vol : float
+        The vol ceiling passed to the optimizer — comes from the UI slider.
+        Stored in the output so Person C can display "optimized at X% vol".
 
     Returns
     -------
@@ -123,7 +124,7 @@ def compute_metrics(
         optimized_return_annual   float   Expected annual return of optimized portfolio
         current_sharpe            float   Sharpe of current portfolio (risk-free = 0)
         optimized_sharpe          float   Sharpe of optimized portfolio (risk-free = 0)
-        risk_bucket               str     Bucket label as selected by user
+        target_vol                float   Vol ceiling used — from the slider
         vol_reduction_pct         float   % reduction in vol: (curr-opt)/curr * 100
         return_improvement_pct    float   % improvement in return: (opt-curr)/curr * 100
 
@@ -151,7 +152,7 @@ def compute_metrics(
         "optimized_return_annual": round(opt_ret, 4),
         "current_sharpe":          round(curr_sharpe, 4),
         "optimized_sharpe":        round(opt_sharpe, 4),
-        "risk_bucket":             risk_bucket,
+        "target_vol":              round(target_vol, 4),
         "vol_reduction_pct":       round(vol_reduction_pct, 2),
         "return_improvement_pct":  round(ret_improvement_pct, 2),
     }])

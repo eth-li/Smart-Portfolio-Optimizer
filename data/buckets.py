@@ -1,52 +1,51 @@
 """
 data/buckets.py
-Risk bucket definitions and target vol mapping.
-
 Owned by Person B. Used by optimizer/solve.py, optimizer/frontier.py, and app.py.
 
-Bucket      | Target Vol | Vol Range   | Max Single Position
-------------|------------|-------------|--------------------
-Conservative| 10%        | 0% – 10%    | 30%
-Moderate    | 14%        | 10% – 18%   | 40%
-Aggressive  | 24%        | 18% – 30%   | 50%
+Design after refactor
+---------------------
+Buckets are now purely UI labels — zone markers on the risk slider that Person C
+renders. They define a vol range and a max position cap, but do NOT dictate the
+target vol passed to the optimizer. That comes directly from the user's slider value.
+
+The optimizer accepts `target_vol` as a plain float. Buckets just tell Person C
+where to draw the "Conservative", "Moderate", and "Aggressive" zones on the slider.
+
+DIVERSITY_FACTOR
+----------------
+Controls the minimum weight floor: min_weight = DIVERSITY_FACTOR / n_stocks.
+With 5 stocks and factor=0.2: floor = 4% per position.
+With 10 stocks and factor=0.2: floor = 2% per position.
+Scales automatically — larger portfolios get smaller floors.
+Tune this constant to adjust how aggressively the optimizer diversifies.
 """
 
 from __future__ import annotations
 
-# Single source of truth for all bucket parameters.
-# target_vol: the vol constraint passed to the optimizer for this bucket.
-# vol_min / vol_max: the annualized vol range that defines membership.
-# max_position: the per-ticker weight cap (prevents degenerate single-stock solutions).
+# ---------------------------------------------------------------------------
+# Diversity factor — tune this to control the min-weight floor
+# min_weight per position = DIVERSITY_FACTOR / n_stocks
+# ---------------------------------------------------------------------------
+DIVERSITY_FACTOR: float = 0.2
+
+# ---------------------------------------------------------------------------
+# Bucket definitions — vol ranges and position caps only.
+# target_vol is NOT here. It comes from the user's slider in the UI.
+# ---------------------------------------------------------------------------
 BUCKET_PARAMS: dict[str, dict] = {
-    # vol_max = the upper bound of the bucket range.
-    # target_vol = the constraint passed to the optimizer.
-    #
-    # IMPORTANT: the achievable vol depends on the input asset universe.
-    # With a tech-heavy portfolio (AAPL, MSFT, NVDA, GOOGL, XOM), the
-    # minimum-variance portfolio is ~19-21% — so Conservative and Moderate
-    # may be infeasible. The optimizer raises a clear ValueError in that case.
-    # This is intentional: it's a key insight in the demo story.
-    #
-    # Thresholds below are designed to always be achievable with the demo portfolio:
-    #   Conservative: target 22% (just above the ~19.6% min-variance floor)
-    #   Moderate:     target 25%
-    #   Aggressive:   target 28% (near full risk budget)
     "Conservative": {
-        "target_vol":  0.22,
-        "vol_min":     0.00,
-        "vol_max":     0.24,
+        "vol_min":      0.00,
+        "vol_max":      0.20,
         "max_position": 0.30,
     },
     "Moderate": {
-        "target_vol":  0.25,
-        "vol_min":     0.24,
-        "vol_max":     0.28,
+        "vol_min":      0.20,
+        "vol_max":      0.28,
         "max_position": 0.40,
     },
     "Aggressive": {
-        "target_vol":  0.28,
-        "vol_min":     0.28,
-        "vol_max":     0.35,
+        "vol_min":      0.28,
+        "vol_max":      0.40,
         "max_position": 0.50,
     },
 }
@@ -56,7 +55,7 @@ VALID_BUCKETS = list(BUCKET_PARAMS.keys())
 
 def get_bucket_params(bucket: str) -> dict:
     """
-    Return the parameter dict for a given risk bucket.
+    Return the UI parameter dict for a given risk bucket label.
 
     Parameters
     ----------
@@ -65,11 +64,12 @@ def get_bucket_params(bucket: str) -> dict:
 
     Returns
     -------
-    dict with keys: target_vol, vol_min, vol_max, max_position
+    dict with keys:
+        vol_min       float   Lower bound of this bucket's vol range
+        vol_max       float   Upper bound of this bucket's vol range
+        max_position  float   Per-ticker weight cap for this bucket
 
-    Raises
-    ------
-    ValueError if bucket is not recognised.
+    Note: target_vol is NOT in this dict. Pass it directly to optimize().
     """
     if bucket not in BUCKET_PARAMS:
         raise ValueError(
@@ -81,12 +81,13 @@ def get_bucket_params(bucket: str) -> dict:
 
 def classify_vol(annualized_vol: float) -> str:
     """
-    Map an annualized portfolio vol to the corresponding risk bucket label.
+    Map an annualized portfolio vol to the corresponding bucket label.
+    Used to display which zone the current portfolio sits in.
 
     Parameters
     ----------
     annualized_vol : float
-        e.g. 0.15 for 15% annual vol.
+        e.g. 0.23 for 23% annual vol.
 
     Returns
     -------
@@ -98,3 +99,21 @@ def classify_vol(annualized_vol: float) -> str:
         return "Moderate"
     else:
         return "Aggressive"
+
+
+def default_target_vol(bucket: str) -> float:
+    """
+    Convenience: return the midpoint of a bucket's vol range as a sensible
+    default when no slider value is provided (e.g. in tests or CLI).
+
+    Parameters
+    ----------
+    bucket : str
+        One of 'Conservative', 'Moderate', 'Aggressive'.
+
+    Returns
+    -------
+    float: midpoint of vol_min and vol_max for that bucket.
+    """
+    params = get_bucket_params(bucket)
+    return (params["vol_min"] + params["vol_max"]) / 2
