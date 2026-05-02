@@ -65,7 +65,7 @@ def _solve_at_target_vol(
     objective = cp.Maximize(mu @ w)
     constraints = [
         cp.sum(w) == 1,                           # fully invested
-        w >= 0,                                   # long-only
+        w >= 0.01,                                # minimum 1% per position — no stock goes to zero
         w <= max_cap,                             # max position cap
         cp.quad_form(w, cov) <= target_vol ** 2, # vol constraint
     ]
@@ -77,11 +77,8 @@ def _solve_at_target_vol(
         return None  # caller decides how to handle
 
     weights = w.value.copy()
-    weights = np.where(weights < 0.005, 0.0, weights)  # zero out dust
-    total = weights.sum()
-    if total < 1e-8:
-        return None
-    weights /= total  # renormalize to exactly 1
+    weights = np.clip(weights, 0.01, None)  # enforce floor after solve
+    weights /= weights.sum()               # renormalize to exactly 1
 
     return weights
 

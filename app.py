@@ -60,19 +60,19 @@ def _run_pipeline(portfolio_df: pd.DataFrame, risk_bucket: str):
 
     # ── Optimizer (Person B) ─────────────────────────────────────────────────
     if OPTIMIZER_LIVE:
-        with st.spinner("Running optimizer..."):
-            result_df = optimize(cov_df, exp_ret, curr_weights, risk_bucket)
-            frontier_df = generate_frontier(cov_df, exp_ret, curr_weights, risk_bucket)
-            opt_weights = result_df.set_index("ticker")["optimized_weight"]
-            metrics_df = compute_metrics(cov_df, exp_ret, curr_weights, opt_weights, risk_bucket)
-            weights_df = result_df  # already has ticker, current_weight, optimized_weight
+        result_df = optimize(cov_df, exp_ret, curr_weights, risk_bucket)
+        frontier_df = generate_frontier(cov_df, exp_ret, curr_weights, risk_bucket)
+        opt_weights = result_df.set_index("ticker")["optimized_weight"]
+        metrics_df = compute_metrics(cov_df, exp_ret, curr_weights, opt_weights, risk_bucket)
+        weights_df = result_df
     else:
-        # Mock mode: patch current_weight with what the user actually entered
+        # Mock mode: patch current_weight from user input; note results won't vary by bucket
         weights_df = pd.read_csv(CONTRACTS / "optimized_weights.csv")
         weights_df = weights_df[weights_df["ticker"].isin(tickers)].copy()
         weights_df["current_weight"] = weights_df["ticker"].map(curr_weights)
         frontier_df = pd.read_csv(CONTRACTS / "frontier.csv")
         metrics_df = pd.read_csv(CONTRACTS / "metrics.csv")
+        metrics_df["risk_bucket"] = risk_bucket
 
     return weights_df, frontier_df, metrics_df, iv_df
 
@@ -169,8 +169,12 @@ portfolio_key = (
     risk_bucket,
 )
 if run_btn or st.session_state.get("portfolio_key") != portfolio_key:
-    st.session_state.results = _run_pipeline(portfolio_df, risk_bucket)
-    st.session_state.portfolio_key = portfolio_key
+    st.session_state.portfolio_key = portfolio_key  # update key first so errors don't cause retry loops
+    try:
+        st.session_state.results = _run_pipeline(portfolio_df, risk_bucket)
+    except Exception as e:
+        st.error(f"Optimizer error: {e}")
+        st.stop()
 
 weights_df, frontier_df, metrics_df, iv_df = st.session_state.results
 row = metrics_df.iloc[0]
