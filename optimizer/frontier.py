@@ -2,15 +2,15 @@
 optimizer/frontier.py
 Owned by Person B.
 
-Generates the efficient frontier by sweeping target_vol from the minimum-variance
-portfolio vol to a given vol ceiling, solving the optimizer at each step.
+Generates the minimum variance frontier by sweeping target_vol from the minimum-
+variance portfolio vol to a given vol ceiling, solving the optimizer at each step.
 
 Public API
 ----------
-generate_frontier(cov_df, expected_returns, vol_min, vol_max, max_position, diversity_factor, n_points)
+generate_frontier(cov_df, vol_max, max_position, diversity_factor, n_points)
     Returns pd.DataFrame matching the contracts/frontier.csv schema.
 
-The frontier spans the full achievable range — Person C plots the whole curve
+The frontier spans the full achievable vol range — Person C plots the whole curve
 and marks the current portfolio + the user's chosen point on top of it.
 """
 
@@ -74,33 +74,30 @@ def _min_variance_vol(
 
 def generate_frontier(
     cov_df: pd.DataFrame,
-    expected_returns: pd.Series,
     vol_max: float,
-    max_position: float = 0.40,
-    diversity_factor: float = DEFAULT_DIVERSITY_FACTOR,
+    max_position: float = 0.50,
+    diversity_factor: float = 0.0,
     n_points: int = 30,
 ) -> pd.DataFrame:
     """
-    Generate efficient frontier data points across the full achievable vol range.
+    Generate minimum variance frontier data points across the full achievable vol range.
 
     Sweeps target_vol from just above the minimum-variance floor to vol_max,
-    solving the max-return problem at each step.
+    solving the minimum-variance problem at each step.
 
     Parameters
     ----------
     cov_df : pd.DataFrame
         Annualized covariance matrix. Index and columns are ticker strings.
-    expected_returns : pd.Series
-        Annualized expected returns, indexed by ticker.
     vol_max : float
-        Upper bound for the frontier sweep — typically the Aggressive bucket's
-        vol_max (0.40). Pass a higher value to extend the curve further right.
+        Upper bound for the frontier sweep — typically the High bucket's
+        vol_max (0.50). Pass a higher value to extend the curve further right.
     max_position : float
         Per-ticker weight cap. Use the most permissive bucket's max_position
-        (Aggressive = 0.50) so the full frontier is visible, not just one bucket.
+        so the full frontier is visible, not just one bucket.
     diversity_factor : float
         Controls minimum weight floor: min_weight = diversity_factor / n.
-        Defaults to DIVERSITY_FACTOR from buckets.py.
+        Defaults to 0.0 (no floor on the frontier — show full curve shape).
     n_points : int
         Number of points to solve along the frontier (default 30).
         More points = smoother curve. Infeasible points are silently skipped.
@@ -108,23 +105,19 @@ def generate_frontier(
     Returns
     -------
     pd.DataFrame matching the contracts/frontier.csv schema:
-        target_vol_annual       float   The vol constraint used for this solve
-        expected_return_annual  float   Achieved expected return at this point
-        sharpe_ratio            float   return / vol (risk-free rate = 0)
-        <TICKER>                float   Optimal weight for each ticker at this point
+        target_vol_annual   float   The vol constraint used for this solve
+        realized_vol_annual float   Actual portfolio vol achieved (sqrt(w^T*cov*w))
+        <TICKER>            float   Optimal weight for each ticker at this point
 
     Notes
     -----
     - The frontier spans the full asset universe range, not just one bucket.
-      Person C draws the bucket zone markers (Conservative/Moderate/Aggressive)
-      as shaded regions on top of this single curve.
-    - Person C marks the current portfolio and the user's chosen point
-      (determined by the slider) as labeled dots on the curve.
+      Person C draws the bucket zone markers as shaded regions on top of this curve.
+    - Person C marks the current portfolio and the user's chosen point as dots.
     - Ticker columns are in the same order as cov_df.index.
     """
     tickers = cov_df.index.tolist()
     cov = cov_df.loc[tickers, tickers].values.astype(float)
-    mu = expected_returns[tickers].values.astype(float)
 
     # Floor: smallest achievable vol given the diversity and position constraints
     vol_floor = _min_variance_vol(cov, max_position, diversity_factor)
@@ -139,26 +132,20 @@ def generate_frontier(
 
     rows = []
     for tv in target_vols:
-        # Frontier uses diversity_factor=0 so it can freely explore the full shape.
-        # The per-ticker floor is intentionally relaxed here — the floor only
-        # applies when optimize() is called with the user's actual portfolio.
         weights = _solve_at_target_vol(
-            cov, mu,
+            cov,
             target_vol=tv,
             max_cap=max_position,
-            diversity_factor=0.0,   # no floor on frontier — show full curve shape
+            diversity_factor=diversity_factor,
         )
         if weights is None:
             continue
 
-        actual_vol = float(np.sqrt(weights @ cov @ weights))
-        actual_ret = float(mu @ weights)
-        sharpe = actual_ret / actual_vol if actual_vol > 1e-8 else 0.0
+        realized_vol = float(np.sqrt(max(float(weights @ cov @ weights), 0.0)))
 
         row: dict = {
-            "target_vol_annual":      round(tv, 6),
-            "expected_return_annual": round(actual_ret, 6),
-            "sharpe_ratio":           round(sharpe, 6),
+            "target_vol_annual":   round(tv, 6),
+            "realized_vol_annual": round(realized_vol, 6),
         }
         for ticker, w in zip(tickers, weights):
             row[ticker] = round(float(w), 6)
@@ -173,8 +160,8 @@ def generate_frontier(
 
     df = pd.DataFrame(rows)
     df = (
-        df.sort_values("expected_return_annual")
-        .drop_duplicates(subset=["expected_return_annual"], keep="first")
+        df.sort_values("target_vol_annual")
+        .drop_duplicates(subset=["target_vol_annual"], keep="first")
         .reset_index(drop=True)
     )
 

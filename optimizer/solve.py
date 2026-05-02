@@ -2,7 +2,7 @@
 optimizer/solve.py
 Owned by Person B.
 
-Maximizes expected return subject to:
+Minimizes portfolio variance subject to:
   - Portfolio annualized vol <= target_vol  (passed directly — from UI slider)
   - Weights sum to 1
   - No short positions (w >= min_weight)
@@ -11,10 +11,10 @@ Maximizes expected return subject to:
 
 Public API
 ----------
-optimize(cov_df, expected_returns, current_weights, target_vol, max_position, diversity_factor)
+optimize(cov_df, current_weights, target_vol, max_position, diversity_factor)
     High-level call. Returns the contracts/optimized_weights.csv schema.
 
-_solve_at_target_vol(cov, mu, target_vol, max_cap, diversity_factor)
+_solve_at_target_vol(cov, target_vol, max_cap, diversity_factor)
     Low-level solve used internally by frontier.py.
 """
 
@@ -37,20 +37,17 @@ from data.buckets import DIVERSITY_FACTOR as DEFAULT_DIVERSITY_FACTOR
 
 def _solve_at_target_vol(
     cov: np.ndarray,
-    mu: np.ndarray,
     target_vol: float,
     max_cap: float,
     diversity_factor: float = DEFAULT_DIVERSITY_FACTOR,
 ) -> np.ndarray | None:
     """
-    Solve the max-return portfolio for a given vol constraint.
+    Solve the minimum-variance portfolio for a given vol constraint.
 
     Parameters
     ----------
     cov : np.ndarray, shape (n, n)
         Annualized covariance matrix. Must be positive semi-definite.
-    mu : np.ndarray, shape (n,)
-        Annualized expected returns.
     target_vol : float
         Upper bound on annualized portfolio volatility (e.g., 0.25 for 25%).
     max_cap : float
@@ -66,7 +63,7 @@ def _solve_at_target_vol(
     np.ndarray of shape (n,) with optimal weights, or None if infeasible.
     Weights sum to 1. Dust below 0.1% is zeroed and renormalized.
     """
-    n = len(mu)
+    n = cov.shape[0]
     min_weight = diversity_factor / n  # scales with portfolio size
 
     # Guard: if min_weight floor would over-constrain (n * min_weight > 1),
@@ -76,7 +73,7 @@ def _solve_at_target_vol(
 
     w = cp.Variable(n)
 
-    objective = cp.Maximize(mu @ w)
+    objective = cp.Minimize(cp.quad_form(w, cov))
     constraints = [
         cp.sum(w) == 1,                           # fully invested
         w >= min_weight,                          # diversity floor (scales with n)
@@ -106,21 +103,18 @@ def _solve_at_target_vol(
 
 def optimize(
     cov_df: pd.DataFrame,
-    expected_returns: pd.Series,
     current_weights: pd.Series,
     target_vol: float,
     max_position: float = 0.40,
     diversity_factor: float = DEFAULT_DIVERSITY_FACTOR,
 ) -> pd.DataFrame:
     """
-    Optimize portfolio weights for a given target volatility.
+    Optimize portfolio weights for minimum variance at a given target volatility.
 
     Parameters
     ----------
     cov_df : pd.DataFrame
         Annualized covariance matrix. Index and columns are ticker strings.
-    expected_returns : pd.Series
-        Annualized expected returns. Index is ticker strings.
     current_weights : pd.Series
         Current portfolio weights (by market value). Sums to ~1.0.
     target_vol : float
@@ -139,8 +133,8 @@ def optimize(
     -------
     pd.DataFrame matching the contracts/optimized_weights.csv schema:
         ticker            str     Ticker symbol
-        current_weight    float   Current portfolio weight
-        optimized_weight  float   Optimizer-recommended weight
+        current_weight    float   Current portfolio weight (rounded to 4dp)
+        optimized_weight  float   Optimizer-recommended weight (rounded to 4dp)
 
     Raises
     ------
@@ -150,15 +144,13 @@ def optimize(
     """
     tickers = cov_df.index.tolist()
 
-    _validate_inputs(cov_df, expected_returns, current_weights, tickers)
+    _validate_inputs(cov_df, current_weights, tickers)
 
     cov = cov_df.loc[tickers, tickers].values.astype(float)
-    mu = expected_returns[tickers].values.astype(float)
     w_curr = current_weights[tickers].values.astype(float)
 
     weights = _solve_at_target_vol(
         cov,
-        mu,
         target_vol=target_vol,
         max_cap=max_position,
         diversity_factor=diversity_factor,
@@ -173,8 +165,8 @@ def optimize(
 
     return pd.DataFrame({
         "ticker":            tickers,
-        "current_weight":    np.round(w_curr, 6),
-        "optimized_weight":  np.round(weights, 6),
+        "current_weight":    np.round(w_curr, 4),
+        "optimized_weight":  np.round(weights, 4),
     })
 
 
@@ -184,14 +176,11 @@ def optimize(
 
 def _validate_inputs(
     cov_df: pd.DataFrame,
-    expected_returns: pd.Series,
     current_weights: pd.Series,
     tickers: list[str],
 ) -> None:
     """Raise informative errors on bad inputs before hitting the solver."""
     for t in tickers:
-        if t not in expected_returns.index:
-            raise KeyError(f"Ticker '{t}' missing from expected_returns.")
         if t not in current_weights.index:
             raise KeyError(f"Ticker '{t}' missing from current_weights.")
 

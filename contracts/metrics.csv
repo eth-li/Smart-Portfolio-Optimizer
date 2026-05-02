@@ -1,2 +1,2 @@
-current_vol_annual,optimized_vol_annual,current_return_annual,optimized_return_annual,current_sharpe,optimized_sharpe,risk_bucket,vol_reduction_pct,return_improvement_pct
-0.3409,0.25,0.2961,0.2268,0.8687,0.9072,Moderate,26.65,-23.4
+current_vol_annual,optimized_vol_annual,vol_reduction_pct,vol_reduction_abs,target_vol,current_bucket,optimized_bucket
+0.2377,0.1857,21.87,0.052,0.25,Medium,Medium-Low

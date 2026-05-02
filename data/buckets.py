@@ -9,7 +9,7 @@ renders. They define a vol range and a max position cap, but do NOT dictate the
 target vol passed to the optimizer. That comes directly from the user's slider value.
 
 The optimizer accepts `target_vol` as a plain float. Buckets just tell Person C
-where to draw the "Conservative", "Moderate", and "Aggressive" zones on the slider.
+where to draw the zone markers on the slider.
 
 DIVERSITY_FACTOR
 ----------------
@@ -33,20 +33,30 @@ DIVERSITY_FACTOR: float = 0.2
 # target_vol is NOT here. It comes from the user's slider in the UI.
 # ---------------------------------------------------------------------------
 BUCKET_PARAMS: dict[str, dict] = {
-    "Conservative": {
+    "Low": {
         "vol_min":      0.00,
-        "vol_max":      0.20,
+        "vol_max":      0.15,
+        "max_position": 0.25,
+    },
+    "Medium-Low": {
+        "vol_min":      0.15,
+        "vol_max":      0.22,
         "max_position": 0.30,
     },
-    "Moderate": {
-        "vol_min":      0.20,
+    "Medium": {
+        "vol_min":      0.22,
         "vol_max":      0.28,
         "max_position": 0.40,
     },
-    "Aggressive": {
+    "Medium-High": {
         "vol_min":      0.28,
-        "vol_max":      0.40,
-        "max_position": 0.50,
+        "vol_max":      0.35,
+        "max_position": 0.45,
+    },
+    "High": {
+        "vol_min":      0.35,
+        "vol_max":      0.50,
+        "max_position": 0.60,
     },
 }
 
@@ -60,7 +70,7 @@ def get_bucket_params(bucket: str) -> dict:
     Parameters
     ----------
     bucket : str
-        One of 'Conservative', 'Moderate', 'Aggressive'.
+        One of 'Low', 'Medium-Low', 'Medium', 'Medium-High', 'High'.
 
     Returns
     -------
@@ -91,14 +101,12 @@ def classify_vol(annualized_vol: float) -> str:
 
     Returns
     -------
-    str: 'Conservative', 'Moderate', or 'Aggressive'
+    str: one of 'Low', 'Medium-Low', 'Medium', 'Medium-High', 'High'
     """
-    if annualized_vol <= BUCKET_PARAMS["Conservative"]["vol_max"]:
-        return "Conservative"
-    elif annualized_vol <= BUCKET_PARAMS["Moderate"]["vol_max"]:
-        return "Moderate"
-    else:
-        return "Aggressive"
+    for label, params in BUCKET_PARAMS.items():
+        if annualized_vol <= params["vol_max"]:
+            return label
+    return "High"
 
 
 def default_target_vol(bucket: str) -> float:
@@ -109,7 +117,7 @@ def default_target_vol(bucket: str) -> float:
     Parameters
     ----------
     bucket : str
-        One of 'Conservative', 'Moderate', 'Aggressive'.
+        One of 'Low', 'Medium-Low', 'Medium', 'Medium-High', 'High'.
 
     Returns
     -------

@@ -7,14 +7,11 @@ summary metrics table at the top of the Streamlit app.
 
 Public API
 ----------
-compute_metrics(cov_df, expected_returns, current_weights, optimized_weights, risk_bucket)
+compute_metrics(cov_df, current_weights, optimized_weights, target_vol)
     Returns single-row pd.DataFrame matching contracts/metrics.csv schema.
 
 compute_portfolio_vol(cov_df, weights)
     Utility: annualized vol for an arbitrary weight vector. Used by Person C.
-
-compute_portfolio_return(expected_returns, weights)
-    Utility: expected return for an arbitrary weight vector. Used by Person C.
 """
 
 from __future__ import annotations
@@ -26,7 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import numpy as np
 import pandas as pd
 
-from data.buckets import get_bucket_params, classify_vol
+from data.buckets import classify_vol
 
 
 # ---------------------------------------------------------------------------
@@ -55,44 +52,12 @@ def compute_portfolio_vol(cov_df: pd.DataFrame, weights: pd.Series) -> float:
     return float(np.sqrt(max(variance, 0.0)))
 
 
-def compute_portfolio_return(expected_returns: pd.Series, weights: pd.Series) -> float:
-    """
-    Annualized expected portfolio return: mu^T * w.
-
-    Parameters
-    ----------
-    expected_returns : pd.Series
-        Annualized expected returns, indexed by ticker.
-    weights : pd.Series
-        Portfolio weights, indexed by ticker.
-
-    Returns
-    -------
-    float: annualized expected return (e.g. 0.18 for 18%).
-    """
-    tickers = weights.index.tolist()
-    mu = expected_returns[tickers].values.astype(float)
-    w = weights[tickers].values.astype(float)
-    return float(mu @ w)
-
-
-def compute_sharpe(portfolio_return: float, portfolio_vol: float, risk_free: float = 0.0) -> float:
-    """
-    Sharpe ratio = (return - risk_free) / vol.
-    Risk-free rate defaults to 0 for simplicity; document this assumption in the slides.
-    """
-    if portfolio_vol < 1e-8:
-        return 0.0
-    return (portfolio_return - risk_free) / portfolio_vol
-
-
 # ---------------------------------------------------------------------------
 # Main metrics function
 # ---------------------------------------------------------------------------
 
 def compute_metrics(
     cov_df: pd.DataFrame,
-    expected_returns: pd.Series,
     current_weights: pd.Series,
     optimized_weights: pd.Series,
     target_vol: float,
@@ -104,10 +69,8 @@ def compute_metrics(
     ----------
     cov_df : pd.DataFrame
         Annualized covariance matrix. Index and columns are ticker strings.
-    expected_returns : pd.Series
-        Annualized expected returns, indexed by ticker.
     current_weights : pd.Series
-        Current portfolio weights (by market value), indexed by ticker. Sums to ~1.
+        Current portfolio weights, indexed by ticker. Sums to ~1.
     optimized_weights : pd.Series
         Optimizer-recommended weights, indexed by ticker. Sums to ~1.
     target_vol : float
@@ -118,41 +81,26 @@ def compute_metrics(
     -------
     Single-row pd.DataFrame matching the contracts/metrics.csv schema:
 
-        current_vol_annual        float   Annualized vol of current portfolio
-        optimized_vol_annual      float   Annualized vol of optimized portfolio
-        current_return_annual     float   Expected annual return of current portfolio
-        optimized_return_annual   float   Expected annual return of optimized portfolio
-        current_sharpe            float   Sharpe of current portfolio (risk-free = 0)
-        optimized_sharpe          float   Sharpe of optimized portfolio (risk-free = 0)
-        target_vol                float   Vol ceiling used — from the slider
-        vol_reduction_pct         float   % reduction in vol: (curr-opt)/curr * 100
-        return_improvement_pct    float   % improvement in return: (opt-curr)/curr * 100
-
-    Notes
-    -----
-    - vol_reduction_pct is the headline stat for the demo — show this first.
-    - Sharpe uses risk-free rate = 0; note this on the presentation slide.
-    - A positive vol_reduction_pct AND positive return_improvement_pct is the
-      "free lunch" story — diversification improved both simultaneously.
+        current_vol_annual    float   Annualized vol of current portfolio
+        optimized_vol_annual  float   Annualized vol of optimized portfolio
+        vol_reduction_pct     float   % reduction: (curr-opt)/curr * 100
+        vol_reduction_abs     float   Absolute reduction in vol (decimal, e.g. 0.05 = 5pp)
+        target_vol            float   Vol ceiling used — from the slider
+        current_bucket        str     Bucket label for current portfolio vol
+        optimized_bucket      str     Bucket label for optimized portfolio vol
     """
     curr_vol = compute_portfolio_vol(cov_df, current_weights)
     opt_vol = compute_portfolio_vol(cov_df, optimized_weights)
-    curr_ret = compute_portfolio_return(expected_returns, current_weights)
-    opt_ret = compute_portfolio_return(expected_returns, optimized_weights)
-    curr_sharpe = compute_sharpe(curr_ret, curr_vol)
-    opt_sharpe = compute_sharpe(opt_ret, opt_vol)
 
     vol_reduction_pct = (curr_vol - opt_vol) / curr_vol * 100 if curr_vol > 1e-8 else 0.0
-    ret_improvement_pct = (opt_ret - curr_ret) / curr_ret * 100 if abs(curr_ret) > 1e-8 else 0.0
+    vol_reduction_abs = curr_vol - opt_vol
 
     return pd.DataFrame([{
-        "current_vol_annual":      round(curr_vol, 4),
-        "optimized_vol_annual":    round(opt_vol, 4),
-        "current_return_annual":   round(curr_ret, 4),
-        "optimized_return_annual": round(opt_ret, 4),
-        "current_sharpe":          round(curr_sharpe, 4),
-        "optimized_sharpe":        round(opt_sharpe, 4),
-        "target_vol":              round(target_vol, 4),
-        "vol_reduction_pct":       round(vol_reduction_pct, 2),
-        "return_improvement_pct":  round(ret_improvement_pct, 2),
+        "current_vol_annual":  round(curr_vol, 4),
+        "optimized_vol_annual": round(opt_vol, 4),
+        "vol_reduction_pct":   round(vol_reduction_pct, 2),
+        "vol_reduction_abs":   round(vol_reduction_abs, 4),
+        "target_vol":          round(target_vol, 4),
+        "current_bucket":      classify_vol(curr_vol),
+        "optimized_bucket":    classify_vol(opt_vol),
     }])
