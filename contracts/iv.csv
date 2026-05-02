@@ -1,0 +1,6 @@
+ticker,iv_annualized,expiry_date,strike,data_source
+AAPL,0.2413,2026-05-15,280.0,options_chain
+MSFT,0.2832,2026-05-15,415.0,options_chain
+NVDA,0.3694,2026-05-15,197.5,options_chain
+GOOGL,0.2957,2026-05-15,385.0,options_chain
+XOM,0.3584,2026-05-15,152.5,options_chain
