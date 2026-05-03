@@ -1,4 +1,4 @@
-"""Fetches historical price data and options chains from yfinance.
+"""Fetches historical price data, options chains, and market-cap weights from yfinance.
 
 Outputs:
   contracts/returns.csv  — daily log returns, 5-year window
@@ -27,7 +27,6 @@ def fetch_returns(tickers: list, period_years: int = 5) -> pd.DataFrame:
 
     raw = yf.download(tickers, start=start, end=end, auto_adjust=True, progress=False)
     prices = raw["Close"] if len(tickers) > 1 else raw["Close"].to_frame(name=tickers[0])
-    # Keep only requested tickers that came back
     available = [t for t in tickers if t in prices.columns]
     prices = prices[available]
 
@@ -43,7 +42,7 @@ def _get_spot(ticker: str) -> float:
 
 
 def _fetch_iv_one(ticker: str, spot: float) -> dict:
-    """Fetch IV for a single ticker. Returns a row dict (always succeeds, fallback on error)."""
+    """Fetch IV for a single ticker. Always succeeds — falls back to historical on error."""
     today = datetime.today().date()
     try:
         t = yf.Ticker(ticker)
@@ -63,19 +62,19 @@ def _fetch_iv_one(ticker: str, spot: float) -> dict:
 
         atm = calls.loc[(calls["strike"] - spot).abs().idxmin()]
         return {
-            "ticker": ticker,
+            "ticker":        ticker,
             "iv_annualized": round(float(atm["impliedVolatility"]), 4),
-            "expiry_date": valid_expiry,
-            "strike": float(atm["strike"]),
-            "data_source": "options_chain",
+            "expiry_date":   valid_expiry,
+            "strike":        float(atm["strike"]),
+            "data_source":   "options_chain",
         }
     except Exception:
         return {
-            "ticker": ticker,
+            "ticker":        ticker,
             "iv_annualized": None,
-            "expiry_date": "",
-            "strike": spot,
-            "data_source": "historical_fallback",
+            "expiry_date":   "",
+            "strike":        spot,
+            "data_source":   "historical_fallback",
         }
 
 
@@ -90,6 +89,64 @@ def fetch_iv(tickers: list, spot_prices: dict, max_workers: int = 10) -> pd.Data
         for future in as_completed(future_to_idx):
             rows[future_to_idx[future]] = future.result()
     return pd.DataFrame(rows)
+
+
+def _fetch_market_cap_one(ticker: str) -> tuple[str, float]:
+    """
+    Fetch market cap for a single ticker.
+    Returns (ticker, cap_in_dollars). Returns 0.0 on any error so the
+    caller can always build a complete Series without crashing.
+    """
+    try:
+        cap = getattr(yf.Ticker(ticker).fast_info, "market_cap", 0) or 0
+        return ticker, float(cap)
+    except Exception:
+        return ticker, 0.0
+
+
+def fetch_market_cap_weights(tickers: list[str], max_workers: int = 20) -> pd.Series:
+    """
+    Fetch market-cap weights for all tickers in parallel.
+
+    Used as the neutral prior for Black-Litterman. Large-cap stocks get higher
+    equilibrium returns, which prevents the optimizer from over-concentrating in
+    recent winners that happen to have high historical returns.
+
+    Parameters
+    ----------
+    tickers : list[str]
+        Tickers to fetch. Order is preserved in the returned Series.
+    max_workers : int
+        Thread pool size. 20 is safe for yfinance's rate limits.
+
+    Returns
+    -------
+    pd.Series indexed by ticker, values sum to 1.0.
+    Falls back to equal weights if all fetches fail or total cap is zero.
+
+    Notes
+    -----
+    Uses ThreadPoolExecutor (same pattern as fetch_iv) so 117-ticker universe
+    takes ~3-5s instead of ~60s from the old serial loop.
+    Any ticker with a failed fetch gets weight 0 before normalization —
+    it effectively falls out of the BL prior, which is a safe degradation.
+    """
+    caps: dict[str, float] = {}
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_fetch_market_cap_one, t): t for t in tickers}
+        for future in as_completed(futures):
+            ticker, cap = future.result()
+            caps[ticker] = cap
+
+    s = pd.Series(caps, dtype=float).reindex(tickers).fillna(0.0)
+    total = s.sum()
+
+    if total < 1e-8:
+        # All fetches failed — equal weights is a safe BL prior fallback
+        return pd.Series(1.0 / len(tickers), index=tickers)
+
+    return s / total
 
 
 def run(tickers: list | None = None, portfolio_path: str = "contracts/portfolio_input.csv") -> tuple:

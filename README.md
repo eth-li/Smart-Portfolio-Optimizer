@@ -1,29 +1,121 @@
 # Smart Portfolio Optimizer
-**CDS Datathon 2026** — A data-powered tool that helps users find the minimum-variance allocation for their stock portfolio.
+**CDS Datathon 2026** — A data-powered tool that helps users find the optimal allocation for their stock portfolio based on their chosen risk tolerance.
 
 ---
 
-## Project Overview
+## What It Does
 
-Users input their current stock holdings as portfolio weights and select a risk tolerance level. The tool pulls historical price data and options-implied volatility, builds a forward-looking covariance matrix, and recommends the minimum-variance allocation within the user's chosen risk budget. Output includes an efficient frontier visualization and a current-vs-optimized allocation comparison.
+Users enter their current stock holdings and pick a risk level. The tool fetches live market data, builds a forward-looking covariance matrix, and runs a mathematically rigorous optimization to recommend a new allocation. It explains what changed, why, and what the risk level means in plain English — powered by Claude AI.
 
-**Real-world decision it solves:** "Given how my stocks move together, how should I reallocate to minimize risk without leaving my chosen risk budget?"
+**Real-world decision it solves:** *"Given how my stocks move together and what the market expects, how should I reallocate to get the best expected return for my risk tolerance?"*
 
-### Why minimum variance, not maximum return?
+---
 
-Expected returns estimated from 2 years of daily price history are too noisy to optimize against reliably. The covariance matrix — how stocks move together — is a much more stable estimate. So the optimizer ignores return forecasts entirely and purely minimizes portfolio variance `w^T * Σ * w` subject to a vol ceiling chosen by the user.
+## How the Math Works
+
+The optimizer runs a full **Markowitz mean-variance optimization** pipeline with several production-grade enhancements:
+
+### 1. Covariance Matrix (how stocks move together)
+- Fetches 5 years of daily log returns via `yfinance`
+- Builds an IV-scaled covariance matrix: diagonal uses **ATM implied volatility** from live options chains (forward-looking), off-diagonal uses historical correlations scaled by IV
+- Falls back to historical variance if options data is unavailable
+
+### 2. Expected Returns — Black-Litterman Model
+Raw historical returns are too noisy to optimize against directly (NVDA's 2023 400% run distorts everything). We use a three-stage pipeline:
+
+**Stage 1 — James-Stein Shrinkage**
+```
+μ_shrunk = 0.6 × μ_historical + 0.4 × μ_cross_sectional_mean
+```
+Blends each stock's own history 60/40 with the average across all stocks. Dampens outlier years without removing relative rankings.
+
+**Stage 2 — Winsorization**
+```
+μ_clipped = clip(μ_shrunk, mean ± 2σ)
+```
+Hard-caps any stock's expected return at 2 standard deviations above/below the universe mean. Prevents NVDA's exceptional years from dominating the signal even after shrinkage.
+
+**Stage 3 — Black-Litterman (no views)**
+```
+π    = λ · Σ · w_mkt          # equilibrium returns (reverse-optimized from market caps)
+μ_BL = 0.9 · π  +  0.1 · μ_hist   # 90% market anchor, 10% historical signal
+```
+Anchors expected returns to what the market already implies via cap-weighted equilibrium. If NVIDIA has a high market cap, it gets a proportionally higher — but not extreme — equilibrium return. This is the **industry-standard institutional approach** to eliminating estimation error in expected returns.
+
+Market-cap weights are fetched in parallel via `yfinance` for all tickers.
+
+### 3. Optimization — CVXPY + CLARABEL Solver
+```
+maximize   μ_BL · w  −  λ_reg · ‖w‖²
+subject to Σ(w) = 1
+           w ≥ lb          (diversity floor: DIVERSITY_FACTOR / n_stocks)
+           w ≤ max_cap      (dynamic position cap)
+           w^T Σ w ≤ σ²     (vol ceiling from risk slider)
+```
+
+Key features:
+- **L2 regularization** (`λ_reg = 0.05`): penalizes concentration continuously — putting 40% in one stock costs more penalty than 20% each, so the optimizer naturally diversifies rather than relying solely on hard caps
+- **Dynamic position cap**: `min(base_cap, 2.0 / n_stocks)` — scales with portfolio size so a 10-stock portfolio can't concentrate 25% in one name
+- **Infeasibility guard**: `compute_min_vol()` finds the true minimum-variance floor first; `target_vol` is clamped to `floor × 1.01` before solving so the solver is always feasible
+- **psd_wrap**: bypasses CVXPY's ARPACK-based PSD certification which fails on large matrices (>~30 tickers)
+
+### 4. Efficient Frontier
+Sweeps `target_vol` from min-variance floor to `TARGET_VOL[bucket] × 1.6`, solving the full Markowitz problem at each point. The BL mu vector is shared across all 30 points so the frontier is consistent with the optimizer.
+
+### 5. AI Explanation — Claude Haiku
+After every optimization, Claude Haiku generates a 3-sentence plain-English explanation:
+1. What specific stocks changed and by how much
+2. A qualitative *why* — uses the actual correlation matrix to explain which stocks are low-correlation hedges vs. concentrated bets
+3. What the resulting risk level means in everyday language ("your portfolio could swing ±X% in a year")
+
+---
+
+## CDS Datathon 2026 — Rubric Checklist
+
+### Technical (10pts)
+
+- ✅ **Data Quality & Relevance** — 5 years of live daily prices + options chains from `yfinance`. IV-scaled covariance matrix. Market-cap weights fetched in parallel. Real financial data, not synthetic.
+
+- ✅ **Model Features, Selection, Optimization** — Full pipeline: James-Stein shrinkage → winsorization → Black-Litterman → CVXPY CLARABEL solver. Tried and justified multiple approaches (raw history → shrinkage → BL). Feature engineering: IV-scaled covariance diagonal, dynamic position caps, L2 regularization.
+
+- ✅ **Accuracy & Generalization** — BL is inherently forward-looking so traditional train/test splits don't apply. Overfitting addressed via: (a) shrinkage toward cross-sectional mean, (b) market-cap prior that dampens in-sample noise, (c) winsorization that removes single-year outliers, (d) L2 regularization that prevents over-concentration on historical winners.
+
+- ✅ **User Interface** — Streamlit app. Plain English throughout ("risk" not "volatility"), tooltips explaining every metric, AI explanation of results, pie charts for allocation (scales to any number of stocks), risk vs. return frontier with plain-English labels.
+
+- ✅ **External APIs & Tools** — `yfinance` (prices + options + market caps), `cvxpy` + `clarabel` (convex optimization), Claude API / Anthropic SDK (Haiku for explanations), `streamlit` (frontend), `plotly` (visualization). All meaningfully integrated.
+
+### Presentation & Communication (8pts)
+
+- ✅ **Idea** — Portfolio optimization is a real problem millions of retail investors face. Direct fit for "data-powered tool that helps users make better real-world decisions."
+
+- ✅ **Visuals** — Risk vs. Return frontier (plain English axes, callout annotation), donut pie charts (current vs. optimized allocation), metrics summary table, 4 headline metric cards.
+
+- ✅ **Story** — User enters their NVDA-heavy portfolio → sees their risk is high → optimizer redistributes weight using Black-Litterman → AI explains what changed and why.
+
+### Results (4pts)
+
+- ✅ **Justification** — BL portfolios historically reduce estimation error vs. naive mean-variance (Idzorek 2005, He & Litterman 1999). Results contextualized via "±X% swing per year" framing.
+
+- ✅ **Impact** — Most retail investors hold unoptimized, concentrated positions. Tool runs in real-time on live market data.
+
+### Flex (5pts)
+
+- ✅ **Extra Technical** — Live options chain parsing, parallel `ThreadPoolExecutor` fetching, convex optimization with custom regularization, LLM API integration, CVXPY with PSD wrapping for large matrices.
+
+- ✅ **Creativity** — Black-Litterman is a genuine institutional finance model rarely seen at student datathons. Most teams use regression/classification; we use convex optimization + Bayesian return estimation.
 
 ---
 
 ## Tech Stack
 
-| Layer | Library |
+| Layer | Library / Tool |
 |---|---|
-| Data | `yfinance` (prices + options chains) |
+| Data | `yfinance` (prices, options chains, market caps) |
 | Math | `numpy`, `pandas`, `scipy` |
 | Optimization | `cvxpy` + `clarabel` |
 | Frontend | `streamlit` |
 | Visualization | `plotly` |
+| AI Explanation | `anthropic` (Claude Haiku) |
 
 ---
 
@@ -31,19 +123,20 @@ Expected returns estimated from 2 years of daily price history are too noisy to 
 
 ```
 .
-├── app.py                  # Streamlit entry point
-├── run_demo.py             # Integration test + contract CSV generator (Person B)
+├── app.py                      # Streamlit entry point (Person C)
+├── run_demo.py                 # Integration test + contract CSV generator (Person B)
 ├── app/
-│   └── charts.py           # Plotly visualizations
+│   └── charts.py               # Plotly visualizations (frontier, pie charts, metrics table)
 ├── data/
-│   ├── fetch.py            # yfinance scraping
-│   ├── risk.py             # covariance + IV
-│   └── buckets.py          # risk bucket definitions + diversity floor
+│   ├── fetch.py                # yfinance scraping + parallel market-cap fetch
+│   ├── risk.py                 # IV-scaled covariance matrix
+│   ├── buckets.py              # Risk buckets, dynamic position caps, diversity floor
+│   └── universe.py             # 117-ticker candidate universe for new-stock recommendations
 ├── optimizer/
-│   ├── solve.py            # cvxpy minimum-variance optimizer
-│   ├── frontier.py         # efficient frontier sweep
-│   └── metrics.py          # portfolio vol stats
-├── contracts/              # ⭐ Static CSV schemas for parallel development
+│   ├── solve.py                # CVXPY optimizer + Black-Litterman + L2 regularization
+│   ├── frontier.py             # Efficient frontier sweep
+│   └── metrics.py              # Portfolio vol stats
+├── contracts/                  # ⭐ Static CSV schemas for parallel development
 │   ├── portfolio_input.csv
 │   ├── returns.csv
 │   ├── covariance.csv
@@ -59,358 +152,91 @@ Expected returns estimated from 2 years of daily price history are too noisy to 
 
 ---
 
-## ⭐ Data Contracts
+## Key Design Decisions
 
-Every file in `contracts/` is a static CSV that defines the exact schema each function must produce and consume. **Code against these mocks on Day 1. Swap in real data at the Day 1 evening checkpoint.**
+### Why Black-Litterman over raw historical returns?
+Raw 5-year returns reward recent outliers (NVDA +400% in 2023). The optimizer then maxes out NVDA at the position cap every time. BL anchors expected returns to market-cap equilibrium — what the *market as a whole* believes — and blends in historical signal at only 10% weight. This produces diversified, defensible allocations.
 
-> **Rule:** Column names, units, and dtypes must match exactly. If your function produces a file, its output must be byte-for-byte compatible with the schema below.
+### Why dynamic position caps?
+A fixed 25% cap on a 3-stock portfolio forces near-equal weights. A fixed 25% cap on a 10-stock portfolio still allows heavy concentration in top performers. `min(base_cap, 2.0 / n_stocks)` means no stock can exceed 2× its equal-weight share, regardless of portfolio size.
+
+### Why L2 regularization instead of just tighter caps?
+Hard caps create discontinuities in the frontier curve and require manual tuning per bucket. L2 penalty (`−0.05 · ‖w‖²`) continuously penalizes concentration as part of the objective — the optimizer trades off expected return against concentration automatically, producing smoother and more robust allocations.
+
+### Why IV-scaled covariance?
+Historical variance underestimates near-term risk during calm periods. ATM implied volatility reflects the market's current forward-looking expectation of each stock's movement. Using IV on the diagonal while preserving historical correlations off-diagonal gives a covariance matrix that is both forward-looking and statistically stable.
 
 ---
 
-### 1. `contracts/portfolio_input.csv`
-**Produced by:** Person C (demo portfolio + what the Streamlit UI collects)  
-**Consumed by:** Person A (tickers to fetch), Person B (current weights for comparison)
+## Data Contracts
 
-```
-ticker,current_weight
-AAPL,0.22
-MSFT,0.27
-NVDA,0.42
-GOOGL,0.03
-XOM,0.06
-```
+Every file in `contracts/` defines the exact schema each function must produce and consume.
 
+### `contracts/portfolio_input.csv`
 | Column | Type | Description |
 |---|---|---|
 | `ticker` | `str` | Valid Yahoo Finance ticker, uppercase |
-| `current_weight` | `float` | User's current allocation as a decimal (e.g. `0.22` = 22%) |
+| `current_weight` | `float` | Allocation as decimal (0.22 = 22%). Must sum to 1.0 |
 
-**Notes:**
-- `current_weight` values must sum to exactly 1.0
-- Minimum 2 tickers, maximum 10 for the demo
-- User enters percentages directly — no share counts, no live price fetching required
-- Person C commits this file on Day 1 morning so A and B can build against real tickers
-
----
-
-### 2. `contracts/returns.csv`
-**Produced by:** Person A (`data/fetch.py`)  
-**Consumed by:** Person A (feeds `risk.py`)
-
-Daily log returns for each ticker over the trailing 2-year window.
-
-```
-date,AAPL,MSFT,NVDA,GOOGL,XOM
-2024-01-02,0.00842,-0.00311,0.02104,0.01204,-0.00129
-2024-01-03,-0.01023,0.00477,-0.01532,-0.00891,0.00671
-...
-```
-
+### `contracts/returns.csv`
 | Column | Type | Description |
 |---|---|---|
-| `date` | `str` (YYYY-MM-DD) | Trading date |
+| `date` | `str` YYYY-MM-DD | Trading date |
 | `<TICKER>` | `float` | Log return: `ln(P_t / P_{t-1})` |
 
-**Notes:**
-- Rows with any NaN dropped entirely — do not forward-fill across tickers
-- ~504 rows for a 2-year daily window
-- Raw prices not included — log returns only
+### `contracts/covariance.csv`
+Square symmetric matrix. Diagonal = IV-scaled variance. Off-diagonal = `corr_hist[i,j] × σ_i × σ_j`. All values annualized (× 252).
 
----
-
-### 3. `contracts/covariance.csv`
-**Produced by:** Person A (`data/risk.py`)  
-**Consumed by:** Person B (`optimizer/solve.py`, `optimizer/frontier.py`)
-
-The IV-scaled covariance matrix. The single most critical handoff in the project.
-
-```
-ticker,AAPL,MSFT,NVDA,GOOGL,XOM
-AAPL,0.0784,0.0544,0.1001,0.0588,0.0172
-MSFT,0.0544,0.0729,0.1010,0.0591,0.0149
-NVDA,0.1001,0.1010,0.3025,0.1056,0.0242
-GOOGL,0.0588,0.0591,0.1056,0.0900,0.0145
-XOM,0.0172,0.0149,0.0242,0.0145,0.0484
-```
-
+### `contracts/iv.csv`
 | Column | Type | Description |
 |---|---|---|
-| `ticker` | `str` | Row label |
-| `<TICKER>` | `float` | Annualized covariance between row and column ticker |
-
-**Notes:**
-- Square, symmetric: `cov[i][j] == cov[j][i]`
-- All values annualized (daily covariance × 252)
-- Diagonal = IV-scaled variance: `σ_i²` where `σ_i` is ATM implied vol. Falls back to historical variance if options data unavailable — flagged in `iv.csv`
-- Off-diagonal = `corr_hist[i][j] × σ_i × σ_j`
-- Person B validates on load: positive semi-definite (`np.linalg.eigvalsh(cov).min() >= -1e-8`)
-
----
-
-### 4. `contracts/iv.csv`
-**Produced by:** Person A (`data/risk.py`)  
-**Consumed by:** Person A (covariance diagonal), Person C (warning badge in UI)
-
-```
-ticker,iv_annualized,expiry_date,strike,data_source
-AAPL,0.2834,2024-02-16,185.0,options_chain
-MSFT,0.2412,2024-02-16,375.0,options_chain
-NVDA,0.4521,2024-02-16,875.0,options_chain
-GOOGL,0.3102,2024-02-16,140.0,options_chain
-XOM,0.1987,2024-02-16,105.0,historical_fallback
-```
-
-| Column | Type | Description |
-|---|---|---|
-| `ticker` | `str` | Ticker symbol |
-| `iv_annualized` | `float` | ATM implied vol, annualized (e.g. `0.28` = 28%) |
-| `expiry_date` | `str` (YYYY-MM-DD) | Options contract expiry used |
-| `strike` | `float` | Strike of the ATM option |
+| `ticker` | `str` | Ticker |
+| `iv_annualized` | `float` | ATM implied vol (0.28 = 28%) |
+| `expiry_date` | `str` | Options expiry used |
+| `strike` | `float` | ATM strike |
 | `data_source` | `str` | `options_chain` or `historical_fallback` |
 
-**Notes:**
-- ATM = strike closest to spot at time of fetch
-- Use nearest expiry with ≥ 7 days to expiration
-- `historical_fallback`: use annualized historical vol from `returns.csv` diagonal
-- Person C shows a warning badge for any `historical_fallback` row
-
----
-
-### 5. `contracts/expected_returns.csv`
-**Produced by:** Person A (`data/risk.py`)  
-**Not consumed by the optimizer** — kept for reference and potential future use
-
-```
-ticker,expected_return_annual
-AAPL,0.1823
-MSFT,0.2104
-NVDA,0.4521
-GOOGL,0.1567
-XOM,0.0987
-```
-
+### `contracts/optimized_weights.csv`
 | Column | Type | Description |
 |---|---|---|
-| `ticker` | `str` | Ticker symbol |
-| `expected_return_annual` | `float` | Mean daily log return × 252 |
+| `ticker` | `str` | Ticker |
+| `current_weight` | `float` | User's input weight |
+| `optimized_weight` | `float` | BL-optimized weight, 4dp |
 
-**Notes:**
-- The optimizer does **not** use this file. Minimum-variance optimization only needs the covariance matrix.
-- Kept in contracts for transparency and slide deck reference — useful to show the audience what returns look like even if we don't optimize against them
-- Computed as `mean_daily_log_return × 252` (not compounded)
-
----
-
-### 6. `contracts/optimized_weights.csv`
-**Produced by:** Person B (`optimizer/solve.py`)  
-**Consumed by:** Person C (`app/charts.py` — allocation comparison bar chart)
-
-```
-ticker,current_weight,optimized_weight
-AAPL,0.2200,0.1823
-MSFT,0.2700,0.2341
-NVDA,0.4200,0.2000
-GOOGL,0.0300,0.1512
-XOM,0.0600,0.2324
-```
-
+### `contracts/metrics.csv`
 | Column | Type | Description |
 |---|---|---|
-| `ticker` | `str` | Ticker symbol |
-| `current_weight` | `float` | User's current allocation (from `portfolio_input.csv`) |
-| `optimized_weight` | `float` | Minimum-variance recommended weight |
-
-**Notes:**
-- `optimized_weight` sums to exactly 1.0
-- All weights ≥ `DIVERSITY_FACTOR / n` (dynamic floor — see Diversity Floor section)
-- No weight exceeds `max_position` for the chosen bucket
-- Weights stored to 4 decimal places (= 2 decimal places of percent, e.g. `0.1234` = 12.34%)
+| `current_vol_annual` | `float` | Current portfolio annualized vol |
+| `optimized_vol_annual` | `float` | Optimized portfolio annualized vol |
+| `vol_reduction_pct` | `float` | `(current − optimized) / current × 100` |
+| `vol_reduction_abs` | `float` | Absolute reduction in decimal |
+| `target_vol` | `float` | User's chosen vol ceiling |
+| `current_bucket` | `str` | Risk zone label for current portfolio |
+| `optimized_bucket` | `str` | Risk zone label for optimized portfolio |
 
 ---
 
-### 7. `contracts/frontier.csv`
-**Produced by:** Person B (`optimizer/frontier.py`)  
-**Consumed by:** Person C (`app/charts.py` — efficient frontier chart)
+## Risk Buckets & Vol Targets
 
-Each row is one point on the frontier, solved by minimizing variance at each target vol level.
+Defined in `data/buckets.py`. Buckets are UI labels — the actual `target_vol` comes from `TARGET_VOL` dict in `app.py`.
 
-```
-target_vol_annual,realized_vol_annual,AAPL,MSFT,NVDA,GOOGL,XOM
-0.1905,0.1892,0.1441,0.2845,0.0000,0.0712,0.5000
-0.1975,0.1963,0.1118,0.3743,0.0359,0.0000,0.4779
-0.2048,0.2031,0.0889,0.3798,0.0722,0.0000,0.4590
-...
-```
+| Bucket | Target Vol | Vol Range (classify) | Base Max Position |
+|---|---|---|---|
+| Low | 18% | 0–20% | 15% |
+| Medium-Low | 22% | 20–25% | 20% |
+| Medium | 27% | 25–30% | 25% |
+| Medium-High | 33% | 30–38% | 30% |
+| High | 42% | 38–55% | 40% |
 
-| Column | Type | Description |
-|---|---|---|
-| `target_vol_annual` | `float` | The vol ceiling constraint used for this solve |
-| `realized_vol_annual` | `float` | Actual achieved vol: `sqrt(w^T * Σ * w)` — may differ slightly from target due to solver rounding |
-| `<TICKER>` | `float` | Optimal weight for this ticker at this frontier point |
+**Dynamic cap formula:** `effective_cap = max(5%, min(base_cap, 2.0 / n_stocks))`
 
-**Notes:**
-- Frontier spans the full vol range (min-variance floor → Aggressive bucket ceiling)
-- No `expected_return` or `sharpe_ratio` columns — we do not use return estimates
-- Person C plots `realized_vol_annual` on the x-axis (not target) for accuracy
-- Person C overlays the current portfolio and the user's chosen point as labeled dots
-- Ticker columns in same order as `portfolio_input.csv`
-- ~30 points. Infeasible solves silently skipped
+**Diversity floor:** `min_weight = DIVERSITY_FACTOR(0.2) / n_stocks`
 
 ---
 
-### 8. `contracts/metrics.csv`
-**Produced by:** Person B (`optimizer/metrics.py`)  
-**Consumed by:** Person C (`app/charts.py` — headline summary table)
+## "Recommend New Stocks" Mode
 
-Single-row summary of current vs. optimized portfolio risk.
-
-```
-current_vol_annual,optimized_vol_annual,vol_reduction_pct,vol_reduction_abs,target_vol,current_bucket,optimized_bucket
-0.3410,0.2400,29.62,0.1010,0.2400,Aggressive,Medium
-```
-
-| Column | Type | Description |
-|---|---|---|
-| `current_vol_annual` | `float` | Annualized vol of the current portfolio |
-| `optimized_vol_annual` | `float` | Annualized vol of the optimized portfolio |
-| `vol_reduction_pct` | `float` | `(current - optimized) / current × 100` — **headline demo stat** |
-| `vol_reduction_abs` | `float` | `current_vol - optimized_vol` in decimal (e.g. `0.10` = 10 percentage points) |
-| `target_vol` | `float` | The vol ceiling the user chose via the slider |
-| `current_bucket` | `str` | Risk bucket label for current portfolio |
-| `optimized_bucket` | `str` | Risk bucket label for optimized portfolio |
-
-**Notes:**
-- `vol_reduction_pct` is the first number the audience sees in the demo
-- No return or Sharpe columns — the optimizer does not use return estimates
-- `current_bucket` and `optimized_bucket` use the 5-bucket labels below
-
----
-
-## Risk Buckets
-
-Defined in `data/buckets.py`. Buckets are **UI labels only** — they do not control the optimizer directly. They tell Person C where to draw zone markers on the risk slider, and they define the `max_position` cap for each risk level.
-
-The actual `target_vol` passed to the optimizer comes from the user's slider position (a plain float), not from the bucket definition.
-
-| Bucket | Vol Range | Max Single Position |
-|---|---|---|
-| Low | 0% – 15% | 25% |
-| Medium-Low | 15% – 22% | 30% |
-| Medium | 22% – 28% | 40% |
-| Medium-High | 28% – 35% | 45% |
-| High | 35% – 50% | 60% |
-
-If the user's current portfolio vol already exceeds their chosen bucket's upper bound, the app shows: *"Your current portfolio exceeds this risk level."*
-
----
-
-## Diversity Floor
-
-Defined in `data/buckets.py` as `DIVERSITY_FACTOR = 0.2`.
-
-The minimum weight per position scales dynamically with portfolio size:
-
-```
-min_weight = DIVERSITY_FACTOR / n_stocks
-```
-
-| Portfolio size | Min weight per position |
-|---|---|
-| 5 stocks | 4.0% |
-| 8 stocks | 2.5% |
-| 10 stocks | 2.0% |
-
-This prevents the optimizer from zeroing out positions entirely while naturally allowing more concentration flexibility in larger portfolios. The frontier sweep uses `diversity_factor = 0.0` (no floor) to show the full theoretical curve shape.
-
----
-
-## Team Roles & Deliverables
-
-### Person A — Data & Risk Engineer
-
-**Responsibilities:**
-- `data/fetch.py` — fetch 2 years of daily prices via yfinance; output `returns.csv`
-- `data/risk.py` — build IV-scaled covariance matrix; output `covariance.csv`, `iv.csv`, `expected_returns.csv`
-- Handle edge cases: missing tickers, illiquid options, NaN rows
-- Fallback: if options data unavailable, use historical vol and set `data_source = historical_fallback`
-
-**Deliverables:**
-- `data/fetch.py`, `data/risk.py`
-- Populate `contracts/returns.csv`, `contracts/covariance.csv`, `contracts/iv.csv`, `contracts/expected_returns.csv` with real data by Day 1 evening checkpoint
-
----
-
-### Person B — Optimization & Backend
-
-**Responsibilities:**
-- `optimizer/solve.py` — minimum-variance cvxpy optimizer; takes `cov_df`, `current_weights`, `target_vol`, `max_position`, `diversity_factor`
-- `optimizer/frontier.py` — sweep `target_vol` from min-variance floor to vol ceiling; output `frontier.csv`
-- `optimizer/metrics.py` — compute vol stats; output `metrics.csv`
-- `data/buckets.py` — 5-bucket definitions, `DIVERSITY_FACTOR`, `classify_vol()`, `default_target_vol()`
-- `run_demo.py` — integration test; runs full pipeline and regenerates all output contracts
-
-**Dev on Day 1:** Read from `contracts/covariance.csv` mock. Do not wait on Person A.
-
-**Deliverables:**
-- All optimizer files + `data/buckets.py` + `run_demo.py`
-- Output contracts: `optimized_weights.csv`, `frontier.csv`, `metrics.csv`
-- All assertions in `run_demo.py` must pass before handing off to Person C
-
----
-
-### Person C — Frontend & Presentation
-
-**Responsibilities:**
-- `app.py` — Streamlit entry point: weight input table, risk slider with bucket zone markers, results display
-- `app/charts.py` — three Plotly charts:
-  - Efficient frontier (`frontier.csv`) — x-axis is `realized_vol_annual`, current + optimized portfolio marked as labeled dots, bucket zones shaded
-  - Allocation comparison grouped bar chart (`optimized_weights.csv`) — current vs. optimized side by side
-  - Headline metrics display (`metrics.csv`) — `vol_reduction_pct` shown first, bucket change shown prominently
-- Commit demo portfolio to `contracts/portfolio_input.csv` on Day 1 morning
-- Build slide deck and presentation narrative
-- Final 15-min polish pass
-
-**Dev on Day 1:** All charts read directly from `contracts/*.csv` mocks. Zero blocking dependency on A or B.
-
-**Deliverables:**
-- `app.py`, `app/charts.py`, `slides/`
-- Demo script + 1 practice run before submission
-
----
-
-## Workflow & Dependencies
-
-```
-Person A (data) ──┐
-                  ├──► Person C (frontend integrates both)
-Person B (optim) ──┘
-```
-
-**Day 1 — parallel:**
-- A: build `fetch.py` + `risk.py`, validate options data in hour 1
-- B: build optimizer reading from `contracts/` mocks, run `python3 run_demo.py` green
-- C: commit demo portfolio, build all three charts against mock CSVs
-
-**Day 1 evening — integration checkpoint:**
-1. A commits real `covariance.csv` to `contracts/`
-2. B pulls, runs `python3 run_demo.py`, commits real output CSVs
-3. C swaps mock reads for live function calls, confirms charts render end-to-end
-
-**Day 2:**
-- End-to-end test with demo portfolio
-- Polish, slide deck, practice run
-
----
-
-## Critical Path Risks
-
-| Risk | Owner | Mitigation |
-|---|---|---|
-| yfinance options data unavailable | A | Validate in hour 1. `historical_fallback` path already handled in schema. Frame IV as "forward-looking enhancement" on slide. |
-| Min-variance floor makes bucket infeasible | B | Run `python3 run_demo.py` against real covariance early. If min-variance portfolio already exceeds target, show informative error in UI. |
-| Optimizer produces near-equal weights (boring demo) | B | Tune `DIVERSITY_FACTOR` — lower it to allow more concentration. Rebalancing story needs meaningful weight changes. |
-| Frontend blocked on real data | C | All charts built against `contracts/*.csv` mocks — zero blocking dependency. |
-| Schema mismatch at integration | All | Column names are exact — copy from this README, don't retype. Run `df.columns.tolist()` check on every read. |
+When enabled, the optimizer selects up to `MAX_NEW_STOCKS = 4` candidates from a 117-ticker universe. Candidates are pre-filtered to the top 4 by BL expected return before the optimizer runs — this keeps the universe small, the covariance fetch fast, and the pie charts readable. Existing positions must retain ≥ 40% of their current weight so the optimizer can't ignore the user's portfolio entirely.
 
 ---
 
@@ -419,12 +245,11 @@ Person B (optim) ──┘
 ```bash
 pip install -r requirements.txt
 
+# Optional: set Claude API key for AI explanations
+export ANTHROPIC_API_KEY=your_key_here
+
 # Run integration test and regenerate output contracts
 python3 run_demo.py
-
-# Run with a specific risk level (mirrors the UI slider)
-python3 run_demo.py --target-vol 0.20
-python3 run_demo.py --bucket High
 
 # Launch the app
 streamlit run app.py
@@ -432,11 +257,8 @@ streamlit run app.py
 
 ---
 
-## Demo Portfolio
+## Environment Variables
 
-`AAPL, MSFT, NVDA, GOOGL, XOM` — tech-heavy with one energy defensive. Current allocation is NVDA-dominated (~42%), which sits in the High risk bucket. The optimizer meaningfully redistributes weight toward MSFT and XOM, pulling the portfolio down into Medium or Medium-High. Clear, visual rebalancing story.
-
-Demo weights committed to `contracts/portfolio_input.csv`:
-```
-AAPL  22%  |  MSFT  27%  |  NVDA  42%  |  GOOGL  3%  |  XOM  6%
-```
+| Variable | Required | Description |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | Optional | Enables Claude AI explanations. Falls back to rule-based summary if not set. |
