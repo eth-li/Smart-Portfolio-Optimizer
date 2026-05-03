@@ -6,3 +6,4 @@ cvxpy>=1.4.0
 streamlit>=1.35.0
 plotly>=5.20.0
 clarabel>=0.7.0
+anthropic>=0.90.0

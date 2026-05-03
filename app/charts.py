@@ -15,76 +15,61 @@ def _effective_n(weights: pd.Series) -> float:
 
 def plot_efficient_frontier(frontier_df: pd.DataFrame, metrics_df: pd.DataFrame) -> go.Figure:
     """
-    Efficient frontier: Annualized Vol (x) vs Effective Number of Positions (y).
-
-    Since we use a minimum-variance optimizer (no return estimates), the y-axis
-    shows portfolio diversification rather than expected return. Higher effective N
-    = more diversified. As you allow more risk (higher vol target), the optimizer
-    concentrates into fewer positions.
+    Efficient frontier: Annualized Vol (x) vs Expected Return (y).
+    Each point is the maximum-return portfolio achievable at that vol level.
+    Current and optimized portfolios are marked as labelled dots.
     """
     row = metrics_df.iloc[0]
-
-    meta_cols = {"target_vol_annual", "realized_vol_annual"}
-    ticker_cols = [c for c in frontier_df.columns if c not in meta_cols]
-
-    weight_matrix = frontier_df[ticker_cols].values.astype(float)
-    hhi = (weight_matrix ** 2).sum(axis=1)
-    effective_n = np.where(hhi > 1e-10, 1.0 / hhi, 1.0)
 
     fig = go.Figure()
 
     fig.add_trace(go.Scatter(
         x=frontier_df["realized_vol_annual"],
-        y=effective_n,
+        y=frontier_df["expected_return_annual"],
         mode="lines+markers",
-        name="Min-Variance Frontier",
+        name="Efficient Frontier",
         line=dict(color="#4A90D9", width=2.5),
-        marker=dict(size=6, color="#4A90D9"),
-        hovertemplate="Vol: %{x:.1%}<br>Effective Positions: %{y:.1f}<extra></extra>",
+        marker=dict(size=5, color="#4A90D9"),
+        hovertemplate="Vol: %{x:.1%}<br>Expected Return: %{y:.1%}<extra></extra>",
     ))
 
     curr_vol = row["current_vol_annual"]
-    opt_vol = row["optimized_vol_annual"]
-
-    closest_curr = (frontier_df["realized_vol_annual"] - curr_vol).abs().idxmin()
-    closest_opt = (frontier_df["realized_vol_annual"] - opt_vol).abs().idxmin()
-    curr_eff_n = effective_n[closest_curr]
-    opt_eff_n = effective_n[closest_opt]
+    curr_ret = row["current_return_annual"]
+    opt_vol  = row["optimized_vol_annual"]
+    opt_ret  = row["optimized_return_annual"]
 
     fig.add_trace(go.Scatter(
-        x=[curr_vol],
-        y=[curr_eff_n],
+        x=[curr_vol], y=[curr_ret],
         mode="markers+text",
         name="Current Portfolio",
         marker=dict(size=16, color="#E74C3C", symbol="diamond"),
         text=["Current"],
         textposition="top right",
-        hovertemplate="Current Portfolio<br>Vol: %{x:.1%}<br>Effective Positions: %{y:.1f}<extra></extra>",
+        hovertemplate="Current<br>Vol: %{x:.1%}<br>Return: %{y:.1%}<extra></extra>",
     ))
 
     fig.add_trace(go.Scatter(
-        x=[opt_vol],
-        y=[opt_eff_n],
+        x=[opt_vol], y=[opt_ret],
         mode="markers+text",
         name="Optimized Portfolio",
         marker=dict(size=16, color="#2ECC71", symbol="star"),
         text=["Optimized"],
         textposition="top right",
-        hovertemplate="Optimized Portfolio<br>Vol: %{x:.1%}<br>Effective Positions: %{y:.1f}<extra></extra>",
+        hovertemplate="Optimized<br>Vol: %{x:.1%}<br>Return: %{y:.1%}<extra></extra>",
     ))
 
     fig.add_annotation(
-        x=opt_vol, y=opt_eff_n,
-        ax=curr_vol, ay=curr_eff_n,
+        x=opt_vol, y=opt_ret,
+        ax=curr_vol, ay=curr_ret,
         xref="x", yref="y", axref="x", ayref="y",
         showarrow=True, arrowhead=2, arrowsize=1.5, arrowwidth=2,
         arrowcolor="#27AE60",
     )
 
     fig.update_layout(
-        title="Min-Variance Frontier: Risk vs Diversification",
-        xaxis=dict(title="Annualized Volatility", tickformat=".0%"),
-        yaxis=dict(title="Effective Number of Positions", tickformat=".1f"),
+        title="Efficient Frontier",
+        xaxis=dict(title="Annualized Volatility", tickformat=".0%", nticks=6),
+        yaxis=dict(title="Expected Annual Return", tickformat=".0%", nticks=6),
         legend=dict(yanchor="bottom", y=0.01, xanchor="right", x=0.99),
         height=480,
         template="plotly_white",
@@ -103,7 +88,7 @@ def plot_allocation_comparison(weights_df: pd.DataFrame) -> go.Figure:
         y=weights_df["current_weight"],
         name="Current",
         marker_color="#E74C3C",
-        text=[f"{w:.1%}" for w in weights_df["current_weight"]],
+        text=[f"{w:.0%}" for w in weights_df["current_weight"]],
         textposition="outside",
         hovertemplate="%{x}<br>Current: %{y:.1%}<extra></extra>",
     ))
@@ -113,7 +98,7 @@ def plot_allocation_comparison(weights_df: pd.DataFrame) -> go.Figure:
         y=weights_df["optimized_weight"],
         name="Optimized",
         marker_color="#2ECC71",
-        text=[f"{w:.1%}" for w in weights_df["optimized_weight"]],
+        text=[f"{w:.0%}" for w in weights_df["optimized_weight"]],
         textposition="outside",
         hovertemplate="%{x}<br>Optimized: %{y:.1%}<extra></extra>",
     ))

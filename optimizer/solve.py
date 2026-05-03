@@ -40,46 +40,57 @@ def _solve_at_target_vol(
     target_vol: float,
     max_cap: float,
     diversity_factor: float = DEFAULT_DIVERSITY_FACTOR,
+    mu: np.ndarray | None = None,
+    min_weights: np.ndarray | None = None,
 ) -> np.ndarray | None:
     """
-    Solve the minimum-variance portfolio for a given vol constraint.
+    Solve for optimal portfolio weights at a given vol ceiling.
+
+    If mu (expected returns) is provided: maximizes expected return subject to
+    vol <= target_vol. This is Markowitz — different target_vols give genuinely
+    different portfolios, so risk tolerance has a real effect on allocation.
+
+    If mu is None: minimizes variance (pure min-variance). All target_vols above
+    the global minimum produce identical results — risk tolerance has no effect.
 
     Parameters
     ----------
     cov : np.ndarray, shape (n, n)
-        Annualized covariance matrix. Must be positive semi-definite.
     target_vol : float
-        Upper bound on annualized portfolio volatility (e.g., 0.25 for 25%).
     max_cap : float
-        Maximum weight for any single ticker (e.g., 0.40).
     diversity_factor : float
-        Controls minimum weight floor: min_weight = diversity_factor / n.
-        With 5 stocks and factor=0.2: each position >= 4%.
-        With 10 stocks and factor=0.2: each position >= 2%.
-        Pass 0.0 to disable the floor (used in frontier sweeps).
+    mu : np.ndarray | None  — expected returns vector, shape (n,)
 
     Returns
     -------
     np.ndarray of shape (n,) with optimal weights, or None if infeasible.
-    Weights sum to 1. Dust below 0.1% is zeroed and renormalized.
     """
     n = cov.shape[0]
-    min_weight = diversity_factor / n  # scales with portfolio size
 
-    # Guard: if min_weight floor would over-constrain (n * min_weight > 1),
-    # fall back to equal weight floor instead of crashing.
-    if n * min_weight > 1.0:
-        min_weight = 1.0 / n
+    if min_weights is not None:
+        lb = min_weights  # per-ticker floor, shape (n,)
+    else:
+        min_weight = diversity_factor / n
+        if n * min_weight > 1.0:
+            min_weight = 1.0 / n
+        lb = np.full(n, min_weight)
 
     w = cp.Variable(n)
-
-    objective = cp.Minimize(cp.quad_form(w, cov))
+    # psd_wrap tells CVXPY to skip its ARPACK-based PSD certification, which
+    # fails to converge on large matrices (>~30 tickers). The matrix is already
+    # validated as PSD in risk.py before being written to contracts/covariance.csv.
+    cov_psd = cp.psd_wrap(cov)
     constraints = [
-        cp.sum(w) == 1,                           # fully invested
-        w >= min_weight,                          # diversity floor (scales with n)
-        w <= max_cap,                             # max position cap
-        cp.quad_form(w, cov) <= target_vol ** 2, # vol constraint
+        cp.sum(w) == 1,
+        w >= lb,
+        w <= max_cap,
+        cp.quad_form(w, cov_psd) <= target_vol ** 2,
     ]
+
+    if mu is not None:
+        objective = cp.Maximize(mu @ w)
+    else:
+        objective = cp.Minimize(cp.quad_form(w, cov_psd))
 
     problem = cp.Problem(objective, constraints)
     problem.solve(solver=cp.CLARABEL, warm_start=True)
@@ -88,12 +99,11 @@ def _solve_at_target_vol(
         return None
 
     weights = w.value.copy()
-    weights = np.where(weights < 0.001, 0.0, weights)  # zero out dust < 0.1%
+    weights = np.where(weights < 0.001, 0.0, weights)
     total = weights.sum()
     if total < 1e-8:
         return None
-    weights /= total  # renormalize to exactly 1
-
+    weights /= total
     return weights
 
 
@@ -107,6 +117,8 @@ def optimize(
     target_vol: float,
     max_position: float = 0.40,
     diversity_factor: float = DEFAULT_DIVERSITY_FACTOR,
+    exp_ret: pd.Series | None = None,
+    min_weights: np.ndarray | None = None,
 ) -> pd.DataFrame:
     """
     Optimize portfolio weights for minimum variance at a given target volatility.
@@ -148,12 +160,15 @@ def optimize(
 
     cov = cov_df.loc[tickers, tickers].values.astype(float)
     w_curr = current_weights[tickers].values.astype(float)
+    mu = exp_ret[tickers].values.astype(float) if exp_ret is not None else None
 
     weights = _solve_at_target_vol(
         cov,
         target_vol=target_vol,
         max_cap=max_position,
         diversity_factor=diversity_factor,
+        mu=mu,
+        min_weights=min_weights,
     )
 
     if weights is None:

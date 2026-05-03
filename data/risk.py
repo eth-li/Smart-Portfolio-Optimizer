@@ -148,8 +148,9 @@ def compute_expected_returns(returns_df: pd.DataFrame) -> pd.DataFrame:
     """
     Compute annualized expected returns as mean daily log return × 252.
 
-    Note: not used by the optimizer (which is pure minimum-variance).
-    Kept for reference and slide deck transparency.
+    Used by the Markowitz optimizer and efficient frontier (maximize μᵀw subject
+    to vol ≤ target). Based on 5-year historical mean — backward-looking but
+    standard practice. Not a prediction; treat as a baseline estimate.
     """
     tickers = [c for c in returns_df.columns if c != "date"]
     means = returns_df[tickers].mean() * 252
@@ -174,7 +175,7 @@ def run(
     # Fallback vols written back to iv.csv
     iv_df.to_csv(iv_path, index=False)
 
-    print("Computing expected returns (reference only, not used by optimizer)...")
+    print("Computing expected returns (used for Markowitz optimizer and frontier)...")
     er_df = compute_expected_returns(returns_df)
     er_df.to_csv("contracts/expected_returns.csv", index=False)
     print("  Saved expected_returns.csv")
