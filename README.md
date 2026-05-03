@@ -243,7 +243,7 @@ When enabled, the optimizer selects up to `MAX_NEW_STOCKS = 4` candidates from a
 ## Setup
 
 ```bash
-pip install -r requirements.txt
+python3 -m pip install -r requirements.txt
 
 # Optional: set Claude API key for AI explanations
 export ANTHROPIC_API_KEY=your_key_here
@@ -252,7 +252,7 @@ export ANTHROPIC_API_KEY=your_key_here
 python3 run_demo.py
 
 # Launch the app
-streamlit run app.py
+python3 -m streamlit run app.py
 ```
 
 ---

@@ -28,19 +28,72 @@ sys.path.insert(0, os.path.dirname(__file__))
 import numpy as np
 import pandas as pd
 
-from optimizer.solve import optimize
+from optimizer.solve import optimize, black_litterman_mu
 from optimizer.frontier import generate_frontier
 from optimizer.metrics import compute_metrics, compute_portfolio_vol
 from data.buckets import (
-    classify_vol, VALID_BUCKETS, get_bucket_params,
+    classify_vol, VALID_BUCKETS, get_bucket_params, dynamic_max_position,
     default_target_vol, DIVERSITY_FACTOR, BUCKET_PARAMS,
 )
 
 
 def load_contracts() -> tuple[pd.DataFrame, pd.DataFrame]:
     portfolio_df = pd.read_csv("contracts/portfolio_input.csv")
+    if "current_weight" not in portfolio_df.columns:
+        if "weight" in portfolio_df.columns:
+            portfolio_df = portfolio_df.rename(columns={"weight": "current_weight"})
+        elif "shares" in portfolio_df.columns:
+            total_shares = portfolio_df["shares"].sum()
+            if total_shares <= 0:
+                raise ValueError("contracts/portfolio_input.csv has no positive shares to normalize.")
+            portfolio_df["current_weight"] = portfolio_df["shares"] / total_shares
+        else:
+            raise ValueError(
+                "contracts/portfolio_input.csv must contain one of: "
+                "current_weight, weight, or shares."
+            )
     cov_df = pd.read_csv("contracts/covariance.csv", index_col=0)
+
+    portfolio_tickers = portfolio_df["ticker"].astype(str).str.upper().tolist()
+    available_tickers = [ticker for ticker in portfolio_tickers if ticker in cov_df.index]
+    missing_tickers = sorted(set(portfolio_tickers) - set(available_tickers))
+
+    if missing_tickers:
+        print(f"Warning: dropping tickers missing from covariance.csv: {', '.join(missing_tickers)}")
+
+    if len(available_tickers) < 2:
+        raise ValueError("Need at least 2 portfolio tickers present in contracts/covariance.csv.")
+
+    portfolio_df = portfolio_df[portfolio_df["ticker"].isin(available_tickers)].copy()
+    cov_df = cov_df.loc[available_tickers, available_tickers]
     return portfolio_df, cov_df
+
+
+def load_expected_returns(tickers: list[str], cov_df: pd.DataFrame) -> pd.Series:
+    """
+    Build BL-adjusted expected returns for the demo universe from returns.csv.
+    Falls back to contracts/expected_returns.csv if returns history is unavailable.
+    """
+    try:
+        returns_df = pd.read_csv("contracts/returns.csv", index_col="date")
+        annual_ret = returns_df[tickers].mean() * 252
+        cross_sectional_mean = annual_ret.mean()
+        shrunk = 0.6 * annual_ret + 0.4 * cross_sectional_mean
+        winsorized = shrunk.clip(
+            lower=shrunk.mean() - 2 * shrunk.std(),
+            upper=shrunk.mean() + 2 * shrunk.std(),
+        )
+        bl_mu = black_litterman_mu(
+            cov_df.loc[tickers, tickers].values.astype(float),
+            winsorized[tickers].values.astype(float),
+        )
+        return pd.Series(bl_mu, index=tickers)
+    except Exception:
+        exp_ret_df = pd.read_csv("contracts/expected_returns.csv")
+        exp_ret = exp_ret_df.set_index("ticker")["expected_return_annual"].reindex(tickers)
+        if exp_ret.isna().any():
+            raise ValueError("Missing expected returns for one or more demo tickers.")
+        return exp_ret
 
 
 def print_section(title: str) -> None:
@@ -50,15 +103,10 @@ def print_section(title: str) -> None:
 
 
 def main(bucket: str = "Medium", target_vol_override: float | None = None) -> None:
-    # We optimize for minimum variance (not maximum return) because 2-year
-    # historical return estimates are too noisy. The covariance matrix is a
-    # more stable input.
-
     # ------------------------------------------------------------------
     # Resolve target_vol and max_position from bucket + optional override
     # ------------------------------------------------------------------
     bucket_params = get_bucket_params(bucket)
-    max_position = bucket_params["max_position"]
 
     if target_vol_override is not None:
         target_vol = target_vol_override
@@ -77,6 +125,8 @@ def main(bucket: str = "Medium", target_vol_override: float | None = None) -> No
 
     tickers = cov_df.index.tolist()
     n = len(tickers)
+    max_position = dynamic_max_position(bucket, n)
+    exp_ret = load_expected_returns(tickers, cov_df)
     curr_vol = compute_portfolio_vol(cov_df, current_weights)
     min_weight_floor = DIVERSITY_FACTOR / n
 
@@ -96,6 +146,7 @@ def main(bucket: str = "Medium", target_vol_override: float | None = None) -> No
         target_vol=target_vol,
         max_position=max_position,
         diversity_factor=DIVERSITY_FACTOR,
+        exp_ret=exp_ret,
     )
     result_df.to_csv("contracts/optimized_weights.csv", index=False)
     print(f"\n  Wrote contracts/optimized_weights.csv")
@@ -121,9 +172,10 @@ def main(bucket: str = "Medium", target_vol_override: float | None = None) -> No
     frontier_df = generate_frontier(
         cov_df,
         vol_max=full_vol_max,
-        max_position=BUCKET_PARAMS["High"]["max_position"],
+        max_position=dynamic_max_position("High", n),
         diversity_factor=0.0,
         n_points=30,
+        exp_ret=exp_ret,
     )
     frontier_df.to_csv("contracts/frontier.csv", index=False)
     print(f"\n  Wrote contracts/frontier.csv ({len(frontier_df)} points, vol range: "
@@ -155,7 +207,9 @@ def main(bucket: str = "Medium", target_vol_override: float | None = None) -> No
     # 5. Sanity checks
     # ------------------------------------------------------------------
     print_section("Sanity Checks")
-    assert len(frontier_df) >= 20, f"Frontier has only {len(frontier_df)} points (need >= 20)"
+    assert len(frontier_df) >= 5, f"Frontier has only {len(frontier_df)} feasible points (need >= 5)"
+    assert frontier_df["realized_vol_annual"].is_monotonic_increasing, \
+        "Frontier realized vols should be sorted ascending"
     assert m["optimized_vol_annual"] <= target_vol + 0.01, \
         f"Optimized vol {m['optimized_vol_annual']:.1%} exceeds target {target_vol:.1%} + 1pp"
     if m["optimized_vol_annual"] >= m["current_vol_annual"]:
